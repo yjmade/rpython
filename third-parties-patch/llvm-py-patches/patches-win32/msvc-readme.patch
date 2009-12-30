@@ -1,0 +1,48 @@
+Index: README
+===================================================================
+--- README	(revision 85)
++++ README	(working copy)
+@@ -16,8 +16,8 @@
+     2.5, use SVN r82 or older.
+ 
+ 
+-Quickstart:
+------------
++Quickstart (Unix):
++------------------
+     1. Get 2.6 version of LLVM, build it. Make sure '--enable-pic' is passed to
+        LLVM's 'configure'.
+ 
+@@ -30,7 +30,32 @@
+ 
+     3. See examples under 'test' directory.
+ 
++Quickstart (Windows):
++---------------------
++    Notes: On Windows only Python 2.6 is supported as llvm does not compile with 
++    Visual Studio 2003 which is required for Python 2.5.
+ 
++    1. Get 2.6 version of LLVM, build it using cmake and Visual Studio 2008 (VS 9). 
++       Build the Release configuration.
++
++    2. Unpack llvm-py, build and install:
++
++        > tar jxvf llvm-py-0.5.tar.bz2
++        > cd llvm-py
++        > python setup-win32.py build 
++          By default, the following location are used:
++          llvm-dir=../llvm-2.4
++          llvm-build-dir=../llvm-2.4/build
++          llvm_dir is used to locate the main includes.
++          llvm-build-dir is used is used to locate the generated includes and 
++          the libraries.
++          
++          You can specify the location as follow:
++          python setup-win32.py build --llvm-dir=../llvm-2.6 --llvm-build-dir=../llvm-2.6/build
++
++    3. See examples under 'test' directory.
++
++
+ LICENSE:
+ --------
+     llvm-py is distributed under the new BSD license, which is similar to

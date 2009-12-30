@@ -1,0 +1,29 @@
+--- llvm-2.6-orig\include\llvm-c\Target.h	2009-08-18 06:03:28.000000000 +0200
++++ llvm-2.6\include\llvm-c\Target.h	2009-12-02 21:51:54.671875000 +0100
+@@ -42,7 +42,7 @@
+ /** LLVMInitializeAllTargetInfos - The main program should call this function if
+     it wants access to all available targets that LLVM is configured to
+     support. */
+-static inline void LLVMInitializeAllTargetInfos() {
++static void LLVMInitializeAllTargetInfos() {
+ #define LLVM_TARGET(TargetName) LLVMInitialize##TargetName##TargetInfo();
+ #include "llvm/Config/Targets.def"
+ }
+@@ -50,7 +50,7 @@
+ /** LLVMInitializeAllTargets - The main program should call this function if it
+     wants to link in all available targets that LLVM is configured to
+     support. */
+-static inline void LLVMInitializeAllTargets() {
++static void LLVMInitializeAllTargets() {
+ #define LLVM_TARGET(TargetName) LLVMInitialize##TargetName##Target();
+ #include "llvm/Config/Targets.def"
+ }
+@@ -58,7 +58,7 @@
+ /** LLVMInitializeNativeTarget - The main program should call this function to
+     initialize the native target corresponding to the host.  This is useful 
+     for JIT applications to ensure that the target gets linked in correctly. */
+-static inline int LLVMInitializeNativeTarget() {
++static int LLVMInitializeNativeTarget() {
+   /* If we have a native target, initialize it to ensure it is linked in. */
+ #ifdef LLVM_NATIVE_ARCH
+ #define DoInit2(TARG) \

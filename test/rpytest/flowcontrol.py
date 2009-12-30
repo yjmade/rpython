@@ -20,6 +20,25 @@ class TestFlowControl(unittest.TestCase):
         self.assertEqual( 20, rpy.run( main_if, 10, 30 ) )
         self.assertEqual( 20, rpy.run( main_if, 30, 10 ) )
 
+    def test_nested_if1( self ):
+        def main_if(x, y, z):
+            if x < y:
+                if x < z:
+                    min_value = x
+                else:
+                    min_value = z
+            elif y < z:
+                min_value = y
+            else:
+                min_value = z
+            return min_value
+        self.assertEqual( 1, rpy.run( main_if, 1, 2, 3 ) )
+        self.assertEqual( 1, rpy.run( main_if, 2, 1, 3 ) )
+        self.assertEqual( 1, rpy.run( main_if, 2, 3, 1 ) )
+        self.assertEqual( 1, rpy.run( main_if, 3, 2, 1 ) )
+        self.assertEqual( 1, rpy.run( main_if, 3, 1, 2 ) )
+                    
+
 
 if __name__ == '__main__':
     unittest.main()

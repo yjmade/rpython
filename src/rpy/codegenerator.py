@@ -73,7 +73,7 @@ class BasicBlock(object):
     """Local variables and related basic block."""
     def __init__( self, l_func, name ):
         self.name = name
-        self.l_basic_block = l_func.append_basic_block( 'entry' )
+        self.l_basic_block = l_func.append_basic_block( name )
         self.incoming_blocks = [] # The list of blocks that branch to this block
         #self.outgoing_blocks = []
         self.locals_value = {} # values of local variable by index
@@ -350,14 +350,14 @@ class FunctionCodeGenerator(object):
         l_value_rhs = self.pop_value()
         l_value_lhs = self.pop_value()
         ipred = _PY_CMP_AS_LLVM[oparg]
-        l_value = self.builder.icmp( ipred, l_value_lhs, l_value_rhs, self.new_var() )
+        l_value = self.builder.icmp( ipred, l_value_lhs, l_value_rhs )
         self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def generic_binary_op( self, value_factory ):
         l_value_rhs = self.pop_value()
         l_value_lhs = self.pop_value()
-        l_value = value_factory( l_value_lhs, l_value_rhs, self.new_var() )
+        l_value = value_factory( l_value_lhs, l_value_rhs )
         self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
 
@@ -378,6 +378,8 @@ class FunctionCodeGenerator(object):
         block_else.incoming_blocks.append( self.current_block )
         # Conditional branch instruction
         l_cond_value = self.pop_value() # must be of type i1
+        if not l_cond_value.name:
+            l_cond_value.name = 'cond_' + if_id
         self.builder.cbranch( l_cond_value,
                               block_then.l_basic_block,
                               block_else.l_basic_block )
@@ -389,11 +391,14 @@ class FunctionCodeGenerator(object):
         return ACTION_BRANCH
 
     def opcode_jump_forward( self, oparg ):
+        branch_index = oparg + self.next_instr_index
+        return self.generic_jump_absolute( branch_index )
+
+    def generic_jump_absolute( self, branch_index ):    
         """Generates a branch instruction.
            Try to retrieve an existing block at target location, and create
            one if none exist.
         """
-        branch_index = oparg + self.next_instr_index
         br_id = self.new_if()
         # Creates or retrieve block corresponding to branch target index
         block = self.get_or_register_target_branch_block( branch_index,
@@ -404,5 +409,9 @@ class FunctionCodeGenerator(object):
         # Force the instruction decoder to pop a register branch target to
         # continue the analysis
         return ACTION_BRANCH
+
+    def opcode_jump_absolute( self, oparg ):
+        branch_index = oparg
+        return self.generic_jump_absolute( branch_index )
                 
 CODE_GENERATOR_OPCODE_FUNCTIONS = make_opcode_functions_map( FunctionCodeGenerator )

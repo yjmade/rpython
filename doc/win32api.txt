@@ -1,0 +1,99 @@
+// # Define conversion:
+// in MSVS:
+// \#define {:i}:b+{\([^\(]*\)}:b*//{.*}$
+// \1 = \2 # \3
+
+HANDLE WINAPI GetStdHandle(
+  __in          DWORD nStdHandle
+);
+
+
+HANDLE WINAPI CreateFile(
+  __in          LPCTSTR lpFileName,
+  __in          DWORD dwDesiredAccess,
+  __in          DWORD dwShareMode,
+  __in          LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+  __in          DWORD dwCreationDisposition,
+  __in          DWORD dwFlagsAndAttributes,
+  __in          HANDLE hTemplateFile
+);
+
+
+
+BOOL WINAPI WriteFile(
+  __in          HANDLE hFile,
+  __in          LPCVOID lpBuffer,
+  __in          DWORD nNumberOfBytesToWrite,
+  __out         LPDWORD lpNumberOfBytesWritten,
+  __in          LPOVERLAPPED lpOverlapped
+);
+
+
+BOOL WINAPI ReadFile(
+  __in          HANDLE hFile,
+  __out         LPVOID lpBuffer,
+  __in          DWORD nNumberOfBytesToRead,
+  __out         LPDWORD lpNumberOfBytesRead,
+  __in          LPOVERLAPPED lpOverlapped
+);
+
+DWORD WINAPI GetLastError(void);
+
+
+DWORD WINAPI FormatMessage(
+  __in          DWORD dwFlags,
+  __in          LPCVOID lpSource,
+  __in          DWORD dwMessageId,
+  __in          DWORD dwLanguageId,
+  __out         LPTSTR lpBuffer,
+  __in          DWORD nSize,
+  __in          va_list* Arguments
+);
+
+
+// Retrieve the system error message for the last-error code
+
+    LPVOID lpMsgBuf;
+    LPVOID lpDisplayBuf;
+    DWORD dw = GetLastError(); 
+
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+        FORMAT_MESSAGE_FROM_SYSTEM |
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        dw,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPTSTR) &lpMsgBuf,
+        0, NULL );
+
+// => also used to query the current position
+BOOL WINAPI SetFilePointerEx(
+  __in          HANDLE hFile,
+  __in          LARGE_INTEGER liDistanceToMove,
+  __out_opt     PLARGE_INTEGER lpNewFilePointer,
+  __in          DWORD dwMoveMethod
+);
+
+BOOL WINAPI GetFileSizeEx(
+  __in          HANDLE hFile,
+  __out         PLARGE_INTEGER lpFileSize
+);
+
+
+
+BOOL WINAPI FlushFileBuffers(
+  __in          HANDLE hFile
+);
+
+BOOL WINAPI SetEndOfFile(
+  __in          HANDLE hFile
+);
+
+
+
+BOOL WINAPI CloseHandle(
+  __in          HANDLE hObject
+);
+
+

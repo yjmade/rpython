@@ -1,0 +1,18 @@
+At initialization, LLVM call lib/System/Win32/DynamicLibrary.inc, SearchForAddressOfSymbol() to retrieve all modules (dynamic libraries) loaded by the executable. Thoses modules are used for symbol look-up by ExecutionEngine::emitGlobals().
+
+
+On calling convention, good link:
+http://nondot.org/sabre/LLVMNotes/CustomCallingConventions.txt
+=> http://www.angelcode.com/dev/callconv/callconv.html
+
+"stdcall is the calling conventions used by the Win32 API. It is basically the same as the cdecl convention with the difference in that the callee is responsible for popping the arguments from the stack. This makes the call slightly faster, but also prevents the use of the ... operator."
+
+Issue when running code in LLI:
+=> stdcall convention is not followed:
+
+01E80010  sub         esp,4 
+01E80013  mov         dword ptr [esp],0FFFFFFF5h 
+01E8001A  call        7C812FD9 
+01E8001F  xor         eax,eax 
+01E80021  add         esp,4    ; <=== should not be done
+01E80024  ret              

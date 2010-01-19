@@ -63,6 +63,28 @@ class CodeGenerator(object):
     def __init__( self, annotator ):
         self.annotator = annotator
 
+def optimize( module ):
+    """Run LLVM optimization passes on the provided ModuleGenerator code.
+    """
+    from llvm.passes import (PassManager,
+                             PASS_PROMOTE_MEMORY_TO_REGISTER)
+    from llvm.ee import TargetData
+    pm = PassManager.new()
+    # Add the target data as the first "pass". This is mandatory.
+    pm.add( TargetData.new('') )
+
+    passes = []
+    # This pass convert memory access to local variable (allocated via alloca)
+    # to register and generates the corresponding phi-nodes.
+    passes.append( PASS_PROMOTE_MEMORY_TO_REGISTER )
+    #passes = [PASS_AGGRESSIVE_DCE, PASS_FUNCTION_INLINING]
+    for l_pass in passes:
+        pm.add( l_pass )
+
+    # Run all the optimization passes over the module
+    pm.run( module.l_module )
+
+
 def run( py_func, *call_args ):
     from rpy.rtypes import ConstantTypeRegistry
     registry = ConstantTypeRegistry()
@@ -82,7 +104,12 @@ def run( py_func, *call_args ):
         if callable.get_function_object() is py_func:
             l_func_entry = func_generator.l_func
             l_func_type = func_generator.l_func_type
-    print( 'Generated module code:\n%s', module.l_module )
+    print( 'Generated module code:' )
+    print( '----------------------\n%s', module.l_module )
+    optimize( module )
+    print( 'Generated module code after optimization:' )
+    print( '-----------------------------------------\n', module.l_module )
+    
     # Execute generate code
     # 1) Convert call args into generic value
     print( 'Invoking function with %r' % (call_args,) )

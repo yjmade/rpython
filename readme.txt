@@ -1,3 +1,5 @@
+Notes: this project is very experimental and a playground to learn LLVM.
+
 This projects aims to provide efficient and fast code generation for restricted python (RPython).
 
 RPython is subset of python that is statically typed. A valid RPython is a valid python programm. The concept of RPython was created by the PyPy project (http://codespeak.net/pypy/dist/pypy/doc/) and is developped in the following paper:

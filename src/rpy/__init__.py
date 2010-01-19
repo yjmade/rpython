@@ -7,15 +7,21 @@ class CallableGraphAnnotator(object):
         self.to_annotate = set()
         self.referenced_by = {} # Dict {CallableType: [CallableType]}
         self.annotator_by_callable = {} # Dict {CallableType: TypeAnnotator}
+        self.annotator_by_func = {} # Dict {py_func: TypeAnnotator}
         self.type_registry = type_registry
         self.entry_point = None
         self.current_callable = None
         type_registry.set_callable_listener( self._on_callable_reference )
 
-    def set_entry_point( self, py_func, r_arg_types ):
+    def set_entry_point( self, py_func, call_args ):
         """Sets the python function object used as entry point with the type f its parameters.
         """
-        callable_type = self.type_registry.from_python_object( py_func )
+        from rpy.typeinference import FunctionLocationHelper # Move this somewhere else...
+        func_location = FunctionLocationHelper(py_func.__code__).get_location(0) # and avoid building this twice
+        r_arg_types = [ self.type_registry.from_python_object(arg,
+                                                              func_location)
+                        for arg in call_args ]
+        callable_type = self.type_registry.from_python_object( py_func, func_location )
         for index, r_arg_type in enumerate(r_arg_types):
             callable_type.record_arg_type( index, r_arg_type )
         self.to_annotate.add( callable_type )
@@ -24,8 +30,7 @@ class CallableGraphAnnotator(object):
     def get_function_annotation( self, py_func ):
         """Returns the TypeAnnotator associated to the specified function.
         """
-        r_func_type = self.type_registry.from_python_object( py_func )
-        return self.annotator_by_callable[ r_func_type ]
+        return self.annotator_by_func[ py_func ]
 
     def annotate_dependencies( self ):
         from rpy.typeinference import TypeAnnotator
@@ -37,6 +42,7 @@ class CallableGraphAnnotator(object):
             py_func = function_type.get_function_object()
             annotator = TypeAnnotator( py_func, self.type_registry )
             self.annotator_by_callable[ annotator.r_func_type ] = annotator
+            self.annotator_by_func[ py_func ] = annotator
             self.current_callable = annotator.r_func_type
             
             print( 'Disassembly of %s:' % py_func )
@@ -61,9 +67,8 @@ def run( py_func, *call_args ):
     from rpy.rtypes import ConstantTypeRegistry
     registry = ConstantTypeRegistry()
     # Annotates call graph types (local var, functions param/return...)
-    r_arg_types = [ registry.from_python_object(arg) for arg in call_args ]
     annotator = CallableGraphAnnotator( registry )
-    annotator.set_entry_point( py_func, r_arg_types )
+    annotator.set_entry_point( py_func, call_args )
     annotator.annotate_dependencies()
     # Generate LLVM code
     from rpy.codegenerator import ModuleGenerator, FunctionCodeGenerator, L_INT_TYPE, L_BOOL_TYPE
@@ -104,5 +109,4 @@ def run( py_func, *call_args ):
         return None
     print( 'Return:',  l_return_value )
     raise ValueError( 'Unsupported return type "%s"' % l_func_entry.return_type )
-    
     

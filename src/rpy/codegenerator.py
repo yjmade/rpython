@@ -1,8 +1,9 @@
-from rpy.opcodedecoder import make_opcode_functions_map, opname, make_opcode_functions_map, opcode_decoder
+from rpy.opcodedecoder import make_opcode_functions_map, opname, make_opcode_functions_map, opcode_decoder, determine_branch_targets
 from rpy.opcodedecoder import CMP_LT, CMP_LE, CMP_EQ, CMP_NE, CMP_GE, CMP_GT, CMP_IN, CMP_NOT_IN, CMP_IS, CMP_IS_NOT, CMP_EXCEPTION_MATCH
 import sys
 import rpy.rtypes as rtypes
 import llvm.core as lcore
+from rpy.typeinference import FunctionLocationHelper
 
 _RTYPE_CONVERTERS = {}
 
@@ -16,8 +17,9 @@ def rtype_unknown_to_llvm( rtype, type_registry ):
 def rtype_callable_to_llvm( rtype_callable, type_registry ):
     l_return_type = rtype_to_llvm( rtype_callable.get_return_type(),
                                    type_registry )
-    l_arg_types = [ rtype_to_llvm(r_arg_type, type_registry)
-                    for r_arg_type in rtype_callable.get_arg_types() ]
+    l_arg_types = []
+    for r_arg_type in rtype_callable.get_arg_types():
+        l_arg_types.append( rtype_to_llvm(r_arg_type, type_registry) )
     return lcore.Type.function( l_return_type, l_arg_types )
 
 L_INT_TYPE = lcore.Type.int(32)
@@ -43,7 +45,6 @@ _PY_CMP_AS_LLVM = {
     CMP_GE: lcore.IPRED_SGE,
     CMP_GT: lcore.IPRED_SGT,
     }
-    
 
 class ModuleGenerator(object):
     def __init__( self ):
@@ -51,7 +52,9 @@ class ModuleGenerator(object):
         self.l_functions = {} # dict { py_func: l_func }
 
     def add_function( self, py_func, type_registry ):
-        r_func_type = type_registry.from_python_object( py_func )
+        func_location = FunctionLocationHelper(
+            py_func.__code__ ).get_location(0)
+        r_func_type = type_registry.from_python_object( py_func, func_location )
         l_func_type = rtype_to_llvm( r_func_type, type_registry )
         l_func_name = py_func.__module__ + '__' + py_func.__name__
         l_function = self.l_module.add_function( l_func_type, l_func_name )
@@ -98,12 +101,12 @@ class FunctionCodeGenerator(object):
         self.py_func = py_func
         self.module_generator = module_generator
         self.annotator = annotator
+        self.annotation = self.annotator.get_function_annotation( self.py_func )
         self.l_func, self.l_func_type = module_generator.add_function( py_func, type_registry )
         self.arg_count = self.l_func_type.arg_count
         self.type_registry = type_registry
-        self.visited_indexes = set()
         self.blocks_by_target = {} # dict{opcode_index: basic_block}
-        self.branch_indexes = []
+        self.branch_indexes = determine_branch_targets( self.py_func.__code__.co_code ) # read-only
         self.local_var_value_by_block = {} # dict{basic_block: 
         self._next_id = 0
         self.value_stack = []
@@ -124,12 +127,11 @@ class FunctionCodeGenerator(object):
         """
         entry_block = BasicBlock( self.l_func, 'entry' )
         builder = lcore.Builder.new( entry_block.l_basic_block )
-        annotation = self.annotator.get_function_annotation( self.py_func )
         py_code = self.py_func.__code__
         locals_ptr = {}
         for local_var_index in range(self.arg_count, py_code.co_nlocals ):
             local_var_name = py_code.co_varnames[local_var_index]
-            r_type = annotation.get_local_var_type( local_var_index )
+            r_type = self.annotation.get_local_var_type( local_var_index )
             l_type = rtype_to_llvm( r_type, self.type_registry )
             l_value = builder.alloca( l_type, local_var_name )
             locals_ptr[local_var_index] = l_value
@@ -142,8 +144,11 @@ class FunctionCodeGenerator(object):
         next_instr = 0
         co_code = self.py_func.__code__.co_code
         print( repr(co_code) )
+        block_indexes = sorted( self.branch_indexes ) # start indexes of basic blocks
+        print( 'Prescan branch indexes: %r' % block_indexes )
+        if block_indexes and block_indexes[0] == 0:
+            del block_indexes[0]
         while True:
-            self.visited_indexes.add( next_instr )
             last_instr = next_instr
             next_instr, opcode, oparg = opcode_decoder( co_code, next_instr )
             try:
@@ -161,28 +166,27 @@ class FunctionCodeGenerator(object):
                     # We are falling through into a new block
                     # We need to inject branch code.
                     print( 'Switched via fall through to new block @%d' % next_instr )
-                    self.branch_indexes.remove( next_instr )
-                    branch_block = self.blocks_by_target[next_instr]
+                    block_indexes.remove( next_instr )
+                    branch_block = self.get_or_register_target_branch_block(next_instr, 'dummy')
                     branch_block.incoming_blocks.append( self.current_block )
                     self.builder.branch( branch_block.l_basic_block )
                     # Set branch basic block as builder target
                     self.builder.position_at_end( branch_block.l_basic_block )
                     self.current_block = branch_block
-                    self.emit_phi_nodes()
                 else:
                     # next_instr has already been initialized, checks that last instruction
                     # was a terminator
                     if next_instr >= len(co_code):
                         raise ValueError( 'Attempting to process instruction beyond end of code block.' )
             elif action == ACTION_BRANCH:
-                if self.branch_indexes:
-                    next_instr = self.branch_indexes.pop(0)
+                if block_indexes:
+                    next_instr = block_indexes.pop(0)
                     # Set branch basic block as builder target
                     print( 'Switched to new block @%d' % next_instr )
-                    branch_block = self.blocks_by_target[next_instr]
+                    #branch_block = self.blocks_by_target[next_instr]
+                    branch_block = self.get_or_register_target_branch_block(next_instr, 'dummyb')
                     self.builder.position_at_end( branch_block.l_basic_block )
                     self.current_block = branch_block
-                    self.emit_phi_nodes()
                 else: # Done, nothing to interpret
                     break
             else:
@@ -197,44 +201,26 @@ class FunctionCodeGenerator(object):
                         This basic block must have been added to a LLVM branch
                         instruction.
         """
+        if branch_opcode_index not in self.branch_indexes:
+            raise ValueError( 'Logic error: no target was found at index %d '
+                              'during initial scan' % branch_opcode_index )
         if branch_opcode_index in self.blocks_by_target:
             raise ValueError( 'Logic error: a basic block has already been '
                               'registered for index %d' % branch_opcode_index )
         self.blocks_by_target[branch_opcode_index] = block
-        self.branch_indexes.append( branch_opcode_index )
 
     def get_or_register_target_branch_block( self, branch_index, name ):
         """
         """
         if branch_index in self.blocks_by_target:
             return self.blocks_by_target[branch_index]
+        if branch_index not in self.branch_indexes:
+            raise ValueError( 'Logic error: no target was found at index %d '
+                              'during initial scan' % branch_index )
         print('Created block for index %d' % branch_index )
         target_block = BasicBlock( self.l_func, name )
         self.blocks_by_target[branch_index] = target_block
-        self.branch_indexes.append( branch_index )
         return target_block
-
-    def emit_phi_nodes( self ):
-        """Emits the phi-nodes for the new basic block.
-        """
-##        print( 'Emitted phi nodes' )
-##        local_var_indexes = {}
-##        for block in self.current_block.incoming_blocks:
-##            print( 'Incoming: %s' % block )
-##            for local_var_index in block.get_modified_local_vars():
-##                if local_var_index not in local_var_indexes:
-##                    local_var_indexes[local_var_index] = []
-##                local_var_indexes[local_var_index].append( block )
-##        for local_var_index, blocks in local_var_indexes.items():
-##            if len(blocks) > 1: # at least 2 blocks modify this local variable
-##                l_value_type = blocks[0].get_local_var( local_var_index ).type
-##                l_value_name = self.new_local(local_var_index)
-##                l_phi_node = self.builder.phi( l_value_type, l_value_name )
-##                for block in blocks:
-##                    l_value = block.get_local_var( local_var_index )
-##                    l_phi_node.add_incoming( l_value, block.l_basic_block )
-##                self.current_block.set_local_var( local_var_index, l_phi_node )
-##        print( self.current_block )
 
     def new_var( self ):
         self._next_id += 1
@@ -250,14 +236,17 @@ class FunctionCodeGenerator(object):
         local_var_name = self.py_func.__code__.co_varnames[local_var_index]
         return '%s.%d' % (local_var_name, next_id)
 
-    def push_value( self, name ):
-        self.value_stack.append( name )
+    def push_value( self, l_value ):
+        self.value_stack.append( l_value )
 
     def pop_value( self ):
         return self.value_stack.pop()
 
     def warning( self, message ):
         print( message, file=sys.stderr )
+
+    def get_constant_type( self, constant_index ):
+        return self.annotation.get_constant_type( constant_index )
 
 ##
 ##    def opcode_load_global( self, oparg ):
@@ -266,8 +255,9 @@ class FunctionCodeGenerator(object):
 ##        return ACTION_PROCESS_NEXT_OPCODE
 ##
     def opcode_load_const( self, oparg ):
-        py_const_value = self.py_func.__code__.co_consts[oparg]
-        r_value_type = self.type_registry.from_python_object( py_const_value )
+        constant_index = oparg
+        py_const_value = self.py_func.__code__.co_consts[constant_index]
+        r_value_type = self.get_constant_type( constant_index )
         l_value_type = rtype_to_llvm( r_value_type, self.type_registry )
         if l_value_type == L_INT_TYPE:
             l_value = lcore.Constant.int( L_INT_TYPE, py_const_value )
@@ -308,10 +298,11 @@ class FunctionCodeGenerator(object):
         local_var_index = oparg
         if local_var_index < self.arg_count: # accessing parameter value
             l_value = self.l_func.args[local_var_index]
+            self.push_value( l_value )
         else:
             l_local_ptr = self.locals_ptr[ local_var_index ]
             l_value = self.builder.load( l_local_ptr )
-        self.push_value( l_value )
+            self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
 ##
 ##    def opcode_load_attr( self, oparg ):
@@ -346,18 +337,24 @@ class FunctionCodeGenerator(object):
     def opcode_binary_modulo( self, oparg ):
         return self.generic_binary_op( self.builder.srem )
 
-    def opcode_compare_op( self, oparg ):
-        l_value_rhs = self.pop_value()
-        l_value_lhs = self.pop_value()
-        ipred = _PY_CMP_AS_LLVM[oparg]
-        l_value = self.builder.icmp( ipred, l_value_lhs, l_value_rhs )
-        self.push_value( l_value )
-        return ACTION_PROCESS_NEXT_OPCODE
+    opcode_inplace_add = opcode_binary_add
+    opcode_inplace_subtract = opcode_binary_subtract
+    opcode_inplace_multiply = opcode_binary_multiply
+    opcode_inplace_floor_divide = opcode_binary_floor_divide
+    opcode_inplace_modulo = opcode_binary_modulo
 
     def generic_binary_op( self, value_factory ):
         l_value_rhs = self.pop_value()
         l_value_lhs = self.pop_value()
         l_value = value_factory( l_value_lhs, l_value_rhs )
+        self.push_value( l_value )
+        return ACTION_PROCESS_NEXT_OPCODE
+
+    def opcode_compare_op( self, oparg ):
+        l_value_rhs = self.pop_value()
+        l_value_lhs = self.pop_value()
+        ipred = _PY_CMP_AS_LLVM[oparg]
+        l_value = self.builder.icmp( ipred, l_value_lhs, l_value_rhs )
         self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
 

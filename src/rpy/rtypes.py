@@ -1,8 +1,19 @@
 """Types
 """
 import types
+import collections
+
+SourceLocation = collections.namedtuple( 'SourceLocation', ('function_name', 'path', 'line', 'detail') )
+
+def make_detailed_location( location, detail ):
+    if location is not None:
+        return SourceLocation( location.function_name, location.path, location.line, detail )
+    return None
 
 class Type(object):
+    def __init__( self, location = None ):
+        self._location = location
+        
     def get_instance_attribute_type( self, type_registry, attribute_name ):
         """Gets the type of a module/class/instance attribute.
         """
@@ -22,18 +33,49 @@ class Type(object):
         """Returns the resolved type corresponding to this type."""
         return self
 
+    def set_location( self, location ):
+        self._location = location
+
+    def get_location( self ):
+        return self._location
+
+    def get_location_str( self ):    
+        location = self.get_location()
+        if location is not None:
+            return ' in %s(%d) %s' % (location.path, location.line, location.detail)
+        return ''
+
+    def __repr__( self ):
+        return '%s(%s @%#x%s)' % (self.__class__.__name__,
+                                   self.get_location_str(),
+                                   id(self),
+                                   self._repr_detail_str() )
+
+    def _repr_detail_str( self ):
+        """Should be overridden by sub-classes that needs extra detail."""
+        return ''
+
+    def is_primitive_type( self ):
+        return False
+
+class PrimitiveType(Type):
+    def is_primitive_type( self ):
+        return True
 
 class NoneType(Type):
     def __repr__( self ):
         return 'NoneType()'
-
-NONE = NoneType()
 
 class CallableType(Type):
     def __init__( self ):
         super(CallableType, self).__init__()
         self._arg_types = {}
         self._return_type = UnknownType()
+
+    def set_location( self, location ):
+        self._return_type.set_location(
+            make_detailed_location( location, 'return type' ) )
+        return super(CallableType, self).set_location( location )
 
     def get_return_type( self ):
         return self._return_type
@@ -49,6 +91,9 @@ class CallableType(Type):
         assert index < self.get_arg_count()
         if index not in self._arg_types:
             unknown_type = UnknownType()
+            arg_location = make_detailed_location( self.get_location(),
+                                                   'arg %d type' % index )
+            unknown_type.set_location( arg_location )
             self._arg_types[index] = unknown_type
         else:
             unknown_type = self._arg_types[index]
@@ -149,20 +194,16 @@ class DictType(Type):
 class ListType(Type):
     pass
 
-class IntegralType(Type):
+class IntegralType(PrimitiveType):
     pass
 
 class IntType(IntegralType):
     pass
 
-INT = IntType()
-
 class BoolType(IntegralType):
     pass
 
-BOOL = BoolType()
-
-class FloatType(Type):
+class FloatType(PrimitiveType):
     pass
 
 class StringType(Type):
@@ -170,23 +211,24 @@ class StringType(Type):
         super(StringType, self).__init__()
         self.length = length
 
-    def __repr__( self ):
+    def _repr_detail_str( self ):
         if self.length >= 0:
-            return 'StringType(%d)' % self.length
-        return 'StringType()'
+            return ', length=%d' % self.length
+        return ''
 
 class BytesType(Type):
     def __init__( self, length = -1 ):
         super(BytesType, self).__init__()
         self.length = length
 
-    def __repr__( self ):
+    def _repr_detail_str( self ):
         if self.length >= 0:
-            return 'BytesType(%d)' % self.length
-        return 'BytesType()'
+            return ', length=%d' % self.length
+        return ''
 
 class ModuleType(Type):
     def __init__( self, module ):
+        super(ModuleType, self).__init__()
         self._module = module # the actual python module object
 
     def get_instance_attribute_type( self, type_registry, attribute_name ):
@@ -198,14 +240,15 @@ class ModuleType(Type):
             return attribute_type
         raise ValueError( "Unsupported module attribute: %r.%s" % (self.class_type, attribute_name) )
 
-    def __repr__( self ):
-        return 'Module(%s)' % self._module
+    def _repr_detail_str( self ):
+        return ', module=%s' % self._module
 
 class UnknownType(Type):
     """A type being guessed.
        Records all the candidate types of the expression.
     """
-    def __init__( self ):
+    def __init__( self, location = None ):
+        super(UnknownType, self).__init__( location=location )
         self.candidates = []
         self._resolved_type = None
 
@@ -217,9 +260,22 @@ class UnknownType(Type):
         if self._resolved_type is None:
             types = set( r_type.get_resolved_type(type_registry)
                          for r_type in self.candidates )
-            if len(types) != 1:
-                raise ValueError( 'Can not resolve unknown type: %r' % self )
-            self._resolved_type = self.candidates[0]
+            
+            first_type = next(iter(types))
+            if len(types) == 1:
+                self._resolved_type = first_type
+            else:
+                primitive_types = [t for t in types if t.is_primitive_type()]
+                if len(primitive_types) == len(types):
+                    same_types = [t for t in types
+                                  if isinstance(t, first_type.__class__)]
+                    if len(same_types) != len(types):
+                        raise ValueError( 'Can not resolve unknown type%s because it is made of distinct primitive types: %r' %
+                                          (self.get_location_str(), self) )
+                    self._resolved_type = first_type
+                else:
+                    raise ValueError( 'Can not resolve unknown type%s (made of distinct non primitive types): %r' %
+                                      (self.get_location_str(), self) )
         return self._resolved_type
 
     def get_instance_attribute_type( self, type_registry, attribute_name ):
@@ -229,8 +285,8 @@ class UnknownType(Type):
             return self.candidates[0].get_instance_attribute_type( type_registry, attribute_name )
         return super(UnknownType, self).get_instance_attribute_type( type_registry, attribute_name )
 
-    def __repr__( self ):
-        return 'Unknown( %s )' % ', '.join( repr(c) for c in self.candidates )
+    def _repr_detail_str( self ):
+        return ', candidates=%s' % ', '.join( repr(c) for c in self.candidates )
 
 ##PREDEFINED_MODULES = {
 ##    'codecs': native_module( {
@@ -239,7 +295,7 @@ class UnknownType(Type):
 ##    }
 
 class ConstantTypeRegistry(object):
-    """
+    """Deduces and remember the RPython type associated to a python object (type or constant value).
     """
     def __init__( self ):
         self.constant_types = {} # dict {object: Type}
@@ -249,7 +305,7 @@ class ConstantTypeRegistry(object):
             list: lambda o: ListType(),
             str: lambda obj: StringType( len(obj) ),
             bytes: lambda obj: BytesType( len(obj) ),
-            int: lambda obj: INT
+            int: lambda obj: IntType()
             }
 
     def set_callable_listener( self, listener ):
@@ -258,7 +314,7 @@ class ConstantTypeRegistry(object):
         """
         self.on_referenced_callable = listener
 
-    def from_python_object( self, obj ):
+    def from_python_object( self, obj, location ):
         """Returns the Type instance corresponding to the given python object.
            If a type was already associated to the python object
            (e.g. class, module, global...), then that type is returned.
@@ -292,7 +348,7 @@ class ConstantTypeRegistry(object):
             if obj.__class__ in self.primitive_factories:
                 obj_type = self.primitive_factories[obj.__class__]( obj )
             else:
-                class_type = self.from_python_object( obj.__class__ )
+                class_type = self.from_python_object( obj.__class__, location )
                 obj_type = InstanceType( class_type )
         else:
             raise ValueError( "Unsupported python type: %r, type: %s" % (obj, type(obj)) )
@@ -300,6 +356,7 @@ class ConstantTypeRegistry(object):
             self.constant_types[obj] = obj_type
         else:
             self.instance_types[id(obj)] = obj_type
+        obj_type.set_location( location )
         return obj_type
 
 #    def get_builtin_type( self, name ):

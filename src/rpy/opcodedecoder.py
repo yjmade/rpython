@@ -1,4 +1,4 @@
-from opcode import opname, EXTENDED_ARG, HAVE_ARGUMENT, cmp_op
+from opcode import opname, EXTENDED_ARG, HAVE_ARGUMENT, cmp_op, hasjrel, hasjabs
 
 class BytecodeCorruption(Exception):
     pass
@@ -65,6 +65,32 @@ def make_opcode_functions_map( cls ):
 ##        else:
 ##            print 'NO HANDLER FOR:', name
     return functions_by_opcode
+
+def determine_branch_targets( co_code ):
+    """Returns a set( indexes ) of all opcode indexes that are branch targets.
+       For conditional jump, there is a branch target for both the branch,
+       and the following opcode.
+    """
+    labels = set()
+    n = len(co_code)
+    opcode_index = 0
+    while opcode_index < n:
+        op = co_code[opcode_index]
+        opcode_index = opcode_index + 1
+        if op >= HAVE_ARGUMENT:
+            oparg = co_code[opcode_index] + co_code[opcode_index+1]*256
+            opcode_index = opcode_index + 2
+            if op in hasjrel:
+                label = opcode_index + oparg
+            elif op in hasjabs:
+                label = oparg
+            else:
+                continue
+            labels.add( label )
+            # Adds the implicit branch target after a (conditional) jump
+            labels.add( opcode_index ) 
+    return labels
+
 
 if __name__ == '__main__':
     print( _opname2id( "SLICE+0" ) )

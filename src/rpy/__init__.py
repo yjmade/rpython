@@ -47,7 +47,7 @@ class CallableGraphAnnotator(object):
             
             print( 'Disassembly of %s:' % py_func )
             import dis
-            print( dis.dis( py_func ) )
+            dis.dis( py_func )
             annotator.explore_function_opcodes()
             annotator.report()
     
@@ -99,7 +99,7 @@ def run( py_func, *call_args ):
     for callable, type_annotator in annotator.annotator_by_callable.items():
         func_generator = FunctionCodeGenerator( py_func, registry, module,
                                                 annotator )
-        func_generator.explore_function_opcodes()
+        func_generator.generate_llvm_code()
         func_generator.report()
         if callable.get_function_object() is py_func:
             l_func_entry = func_generator.l_func

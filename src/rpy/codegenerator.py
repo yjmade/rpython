@@ -72,14 +72,21 @@ ACTION_PROCESS_NEXT_OPCODE = 0
 # next instruction to process.
 ACTION_BRANCH = 1
 
+INVALID_OPCODE_INDEX = -1
+
 class BasicBlock(object):
     """Local variables and related basic block."""
-    def __init__( self, l_func, name ):
+    def __init__( self, l_func, name, opcode_index ):
+        # prefix name with opcode index to make it easier to match
+        # llvm code to python bytecode
+        name = 'l%d_%s' % (opcode_index, name) 
         self.name = name
         self.l_basic_block = l_func.append_basic_block( name )
         self.incoming_blocks = [] # The list of blocks that branch to this block
         #self.outgoing_blocks = []
         self.locals_value = {} # values of local variable by index
+        self.loop_break_index = INVALID_OPCODE_INDEX
+        self.has_final_break_jump = False
 
     def set_local_var( self, index, l_value ):
         self.locals_value[index] = l_value
@@ -90,6 +97,33 @@ class BasicBlock(object):
     def get_modified_local_vars( self ):
         """Return the list of modified local variables in the block."""
         return self.locals_value.keys()
+
+    def setup_loop_break_target( self, branch_index ):
+        # A block can only setup one loop
+        assert self.loop_break_index == INVALID_OPCODE_INDEX
+        self.loop_break_index = branch_index
+
+    def ends_with_loop_break( self ):
+        assert not self.has_final_break_jump # a block can not break multiple loop
+        self.has_final_break_jump = True
+
+    def find_break_branch_target( self ):
+        """Locates the setup_loop branch target matching this block break statement.
+        This is done by looking at incoming blocks that setup a loop.
+        """
+        if not self.has_final_break_jump:
+            raise ValueError( 'Logic error: attempting to add break to jump to block without break opcode.' )
+        blocks_to_visit = list(self.incoming_blocks)
+        visited_blocks = set() # cycle detector
+        while blocks_to_visit:
+            block = blocks_to_visit.pop(0)
+            if block.loop_break_index != INVALID_OPCODE_INDEX:
+                return block.loop_break_index
+            visited_blocks.add( block )
+            blocks_to_visit += [ b
+                                 for b in block.incoming_blocks
+                                 if b not in visited_blocks ]
+        raise ValueError( 'Could not locate block that setup the loop for block %r' % self )
 
     def __repr__( self ):
         return '<BasicBlock %s: locals=%s, incoming=%s>' % (self.name,
@@ -111,6 +145,7 @@ class FunctionCodeGenerator(object):
         self._next_id = 0
         self.value_stack = []
         self._next_if = 0
+        self.pending_break_jump_blocks = [] # List of blocks that need a final "break" jump
         # self.locals_ptr: dict{local_var_index: l_value}
         #   This dictionary contains pointer to local variable memory
         #   allocated via alloca().
@@ -125,7 +160,8 @@ class FunctionCodeGenerator(object):
            The mem2reg optimization pass will convert alloca memory access into
            register, avoiding the asle of creating phi node in the front-end.
         """
-        entry_block = BasicBlock( self.l_func, 'entry' )
+        entry_block = BasicBlock( self.l_func, 'entry', 0 )
+        self.blocks_by_target[0] = entry_block
         builder = lcore.Builder.new( entry_block.l_basic_block )
         py_code = self.py_func.__code__
         locals_ptr = {}
@@ -138,7 +174,12 @@ class FunctionCodeGenerator(object):
         return (builder, entry_block, locals_ptr)
 
     def report( self ):
-        print( 'Code for function', self.l_func )
+        print( '* Code for function', self.l_func )
+        self.dump_block_flow()
+
+    def generate_llvm_code( self ):
+        self.explore_function_opcodes()
+        self.process_pending_break_jumps()
 
     def explore_function_opcodes( self ):
         next_instr = 0
@@ -192,6 +233,25 @@ class FunctionCodeGenerator(object):
             else:
                 raise ValueError( 'Invalid action: %d' % action )
 
+    def process_pending_break_jumps( self ):
+        # Notes: should probably have a better algo that avoid scanning the flow graph
+        # multiple times.
+        for block in self.pending_break_jump_blocks:
+            branch_index = block.find_break_branch_target()
+            # Setup context to emit branch instruction
+            self.builder.position_at_end( block.l_basic_block )
+            self.current_block = block
+            # Emit branch instruction
+            self.generic_jump_absolute( branch_index )
+
+    def dump_block_flow( self ):
+        opcode_indexes = self.branch_indexes
+        opcode_indexes.add( 0 )
+        print( '* Block flow (%d blocks):' % len(opcode_indexes) )
+        for opcode_index in sorted( opcode_indexes ):
+            print( '@%d = %r' % (opcode_index,
+                                 self.blocks_by_target[opcode_index]) )
+
     def register_branch_target( self, branch_opcode_index, block ):
         """Register a basic block for a branch target.
            Parameters:
@@ -218,7 +278,7 @@ class FunctionCodeGenerator(object):
             raise ValueError( 'Logic error: no target was found at index %d '
                               'during initial scan' % branch_index )
         print('Created block for index %d' % branch_index )
-        target_block = BasicBlock( self.l_func, name )
+        target_block = BasicBlock( self.l_func, name, branch_index )
         self.blocks_by_target[branch_index] = target_block
         return target_block
 
@@ -369,9 +429,9 @@ class FunctionCodeGenerator(object):
         then_branch_index = self.next_instr_index
         else_branch_index = oparg
         if_id = self.new_if()
-        block_then = BasicBlock( self.l_func, '%s_then' % if_id )
+        block_then = BasicBlock( self.l_func, '%s_then' % if_id, then_branch_index )
         block_then.incoming_blocks.append( self.current_block )
-        block_else = BasicBlock( self.l_func, '%s_else' % if_id )
+        block_else = BasicBlock( self.l_func, '%s_else' % if_id, else_branch_index )
         block_else.incoming_blocks.append( self.current_block )
         # Conditional branch instruction
         l_cond_value = self.pop_value() # must be of type i1
@@ -410,5 +470,30 @@ class FunctionCodeGenerator(object):
     def opcode_jump_absolute( self, oparg ):
         branch_index = oparg
         return self.generic_jump_absolute( branch_index )
+
+    def opcode_setup_loop( self, oparg ):
+        """This opcode is used to setup the jump location when
+        a break statement occurs in a loop.
+        It is expected that the next opcode will a branch target when
+        the loop occurs.
+        Related opcodes: break_loop, pop_block.
+        """
+        assert self.next_instr_index in self.branch_indexes
+        branch_index = oparg + self.next_instr_index
+        self.current_block.setup_loop_break_target( branch_index )
+        return ACTION_PROCESS_NEXT_OPCODE
+
+    def opcode_break_loop( self, oparg ):
+        """Break loop jumps to the target previously defined by the setup_loop
+        opcode. This is deduced by execution flow analysis once all blocks
+        have been proceceed.
+        So at this time, we just mark the current block as a "loop ending"
+        block to which the branching instruction will be appended once
+        the matching setup_loop has been identified.
+        Related opcodes: setup_loop, pop_block.
+        """
+        self.current_block.ends_with_loop_break()
+        self.pending_break_jump_blocks.append( self.current_block )
+        return ACTION_BRANCH
                 
 CODE_GENERATOR_OPCODE_FUNCTIONS = make_opcode_functions_map( FunctionCodeGenerator )

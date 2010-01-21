@@ -236,7 +236,7 @@ class FunctionCodeGenerator(object):
                     # We need to inject branch code.
                     print( 'Switched via fall through to new block @%d' % next_instr )
                     block_indexes.remove( next_instr )
-                    branch_block = self.get_or_register_target_branch_block(next_instr, 'dummy')
+                    branch_block = self.obtain_block_at(next_instr, 'fall_through')
                     branch_block.incoming_blocks.append( self.current_block )
                     self.builder.branch( branch_block.l_basic_block )
                     # Set branch basic block as builder target
@@ -253,7 +253,7 @@ class FunctionCodeGenerator(object):
                     # Set branch basic block as builder target
                     print( 'Switched to new block @%d' % next_instr )
                     #branch_block = self.blocks_by_target[next_instr]
-                    branch_block = self.get_or_register_target_branch_block(next_instr, 'dummyb')
+                    branch_block = self.obtain_block_at(next_instr, 'some_branch')
                     self.builder.position_at_end( branch_block.l_basic_block )
                     self.current_block = branch_block
                 else: # Done, nothing to interpret
@@ -280,25 +280,13 @@ class FunctionCodeGenerator(object):
             print( '@%d = %r' % (opcode_index,
                                  self.blocks_by_target[opcode_index]) )
 
-    def register_branch_target( self, branch_opcode_index, block ):
-        """Register a basic block for a branch target.
+    def obtain_block_at( self, branch_index, name ):
+        """Obtains a block at the specified opcode index.
+           If the block does not exist, it is created with the specified name.
            Parameters:
-           branch_opcode_index: index of the opcode of the first instruction
-                                corresponding to the basic block.
-           basic_block: basic block used to store translated instruction.
-                        This basic block must have been added to a LLVM branch
-                        instruction.
-        """
-        if branch_opcode_index not in self.branch_indexes:
-            raise ValueError( 'Logic error: no target was found at index %d '
-                              'during initial scan' % branch_opcode_index )
-        if branch_opcode_index in self.blocks_by_target:
-            raise ValueError( 'Logic error: a basic block has already been '
-                              'registered for index %d' % branch_opcode_index )
-        self.blocks_by_target[branch_opcode_index] = block
-
-    def get_or_register_target_branch_block( self, branch_index, name ):
-        """
+           branch_index: index of the opcode of the first instruction
+                         corresponding to the basic block.
+           name: name of the block, only used if the block does not exist.
         """
         if branch_index in self.blocks_by_target:
             return self.blocks_by_target[branch_index]
@@ -311,7 +299,7 @@ class FunctionCodeGenerator(object):
         return target_block
 
     def reset_block_name( self, branch_index, name ):
-        block = self.get_or_register_target_branch_block( branch_index, name )
+        block = self.obtain_block_at( branch_index, name )
         block.set_block_name( name )
 
     def new_id( self, prefix ):
@@ -446,17 +434,18 @@ class FunctionCodeGenerator(object):
            Two basic blocks are provided to the branch instruction:
            one if the condition is true, and the other one if the condition
            is false.
-           Each basic block is registered using register_branch_target() and
+           Each basic block is registered using obtain_block_at() and
            associated to the corresponding python code.
         """
         then_branch_index = self.next_instr_index
         else_branch_index = oparg
+        # Get block for then/else branch, and rename them
         then_id = self.new_id( 'then' )
         else_id = self.new_id( 'else' )
         cond_id = self.new_id( 'if_cond' )
-        block_then = BasicBlock( self.l_func, then_id, then_branch_index )
+        block_then = self.obtain_block_at( then_branch_index, then_id )
         block_then.incoming_blocks.append( self.current_block )
-        block_else = BasicBlock( self.l_func, else_id, else_branch_index )
+        block_else = self.obtain_block_at( else_branch_index, else_id )
         block_else.incoming_blocks.append( self.current_block )
         # Conditional branch instruction
         l_cond_value = self.pop_value() # must be of type i1
@@ -465,9 +454,6 @@ class FunctionCodeGenerator(object):
         self.builder.cbranch( l_cond_value,
                               block_then.l_basic_block,
                               block_else.l_basic_block )
-        # Register branch targets
-        self.register_branch_target( then_branch_index, block_then )
-        self.register_branch_target( else_branch_index, block_else )
         # Force the instruction decoder to pop a register branch target to
         # continue the analysis
         return ACTION_BRANCH
@@ -483,8 +469,7 @@ class FunctionCodeGenerator(object):
         """
         br_id = self.new_id( 'branch' )
         # Creates or retrieve block corresponding to branch target index
-        block = self.get_or_register_target_branch_block( branch_index,
-                                                          br_id )
+        block = self.obtain_block_at( branch_index, br_id )
         block.incoming_blocks.append( self.current_block )
         # Emit the branch instruction
         self.builder.branch( block.l_basic_block )

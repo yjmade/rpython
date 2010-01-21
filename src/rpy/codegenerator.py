@@ -87,6 +87,8 @@ class BasicBlock(object):
         self.locals_value = {} # values of local variable by index
         self.loop_break_index = INVALID_OPCODE_INDEX
         self.has_final_break_jump = False
+        self.is_loop_end = False
+        self.related_loop_setup_block = None # Resolved block that setup the loop for block with break statement
 
     def set_block_name( self, name ):
         self.l_basic_block.name = self._make_name( name )
@@ -120,28 +122,42 @@ class BasicBlock(object):
         assert not self.has_final_break_jump # a block can not break multiple loop
         self.has_final_break_jump = True
 
+    def ends_loop( self ):
+        assert not self.is_loop_end # a block can only ends a single loop
+        self.is_loop_end = True
+
     def find_break_branch_target( self ):
         """Locates the setup_loop branch target matching this block break statement.
         This is done by looking at incoming blocks that setup a loop.
         """
         if not self.has_final_break_jump:
             raise ValueError( 'Logic error: attempting to add break to jump to block without break opcode.' )
-        blocks_to_visit = list(self.incoming_blocks)
+        blocks_to_visit = [(block, 0) for block in self.incoming_blocks]
         visited_blocks = set() # cycle detector
         while blocks_to_visit:
-            block = blocks_to_visit.pop(0)
+            block, nesting_level = blocks_to_visit.pop(0)
+            if block.is_loop_end:
+                nesting_level -= 1
             if block.loop_break_index != INVALID_OPCODE_INDEX:
-                return block.loop_break_index
+                nesting_level += 1
+                if nesting_level == 1:
+                    self.related_loop_setup_block = block
+                    return block.loop_break_index
             visited_blocks.add( block )
-            blocks_to_visit += [ b
+            blocks_to_visit += [ (b, nesting_level)
                                  for b in block.incoming_blocks
                                  if b not in visited_blocks ]
         raise ValueError( 'Could not locate block that setup the loop for block %r' % self )
 
     def __repr__( self ):
-        return '<BasicBlock %s: locals=%s, incoming=%s>' % (self.name,
+        if self.related_loop_setup_block:
+            loop_info = ', loop_start=%s' % self.related_loop_setup_block.name
+        else:
+            loop_info = ''
+        return '<BasicBlock %s: locals=%s, incoming=%s%s>' % (self.name,
             list(self.locals_value),
-            list(block.name for block in self.incoming_blocks) )
+            list(block.name for block in self.incoming_blocks),
+            loop_info )
 
 class FunctionCodeGenerator(object):
     def __init__( self, py_func, type_registry, module_generator, annotator ):
@@ -512,5 +528,14 @@ class FunctionCodeGenerator(object):
         self.current_block.ends_with_loop_break()
         self.pending_break_jump_blocks.append( self.current_block )
         return ACTION_BRANCH
+
+    def opcode_pop_block( self, oparg ):
+        """Opcodes executed when a while loop ends without break.
+           In CPython, this pop the "setup_loop" context from a stack.
+           For flow analysis, the current block is marked as ending a while loop,
+           so that nested while loop are handled correctly.
+        """
+        self.current_block.ends_loop()
+        return ACTION_PROCESS_NEXT_OPCODE
                 
 CODE_GENERATOR_OPCODE_FUNCTIONS = make_opcode_functions_map( FunctionCodeGenerator )

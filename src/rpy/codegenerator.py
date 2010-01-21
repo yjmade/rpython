@@ -79,14 +79,27 @@ class BasicBlock(object):
     def __init__( self, l_func, name, opcode_index ):
         # prefix name with opcode index to make it easier to match
         # llvm code to python bytecode
-        name = 'l%d_%s' % (opcode_index, name) 
-        self.name = name
+        self.opcode_index = opcode_index
+        name = self._make_name( name )
         self.l_basic_block = l_func.append_basic_block( name )
         self.incoming_blocks = [] # The list of blocks that branch to this block
         #self.outgoing_blocks = []
         self.locals_value = {} # values of local variable by index
         self.loop_break_index = INVALID_OPCODE_INDEX
         self.has_final_break_jump = False
+
+    def set_block_name( self, name ):
+        self.l_basic_block.name = self._make_name( name )
+
+    @property
+    def name( self ):
+        return self.l_basic_block.name
+
+    def _make_name( self, name ):
+        """Returns a name prefixed with the opcode index.
+           This ease the analysis when comparing python bytecode and LLVM IR.
+        """
+        return 'l%d_%s' % (self.opcode_index, name) 
 
     def set_local_var( self, index, l_value ):
         self.locals_value[index] = l_value
@@ -142,9 +155,8 @@ class FunctionCodeGenerator(object):
         self.blocks_by_target = {} # dict{opcode_index: basic_block}
         self.branch_indexes = determine_branch_targets( self.py_func.__code__.co_code ) # read-only
         self.local_var_value_by_block = {} # dict{basic_block: 
-        self._next_id = 0
+        self._next_id_by_prefix = {}
         self.value_stack = []
-        self._next_if = 0
         self.pending_break_jump_blocks = [] # List of blocks that need a final "break" jump
         # self.locals_ptr: dict{local_var_index: l_value}
         #   This dictionary contains pointer to local variable memory
@@ -282,19 +294,14 @@ class FunctionCodeGenerator(object):
         self.blocks_by_target[branch_index] = target_block
         return target_block
 
-    def new_var( self ):
-        self._next_id += 1
-        return 'tmp%d' % self._next_id
+    def reset_block_name( self, branch_index, name ):
+        block = self.get_or_register_target_branch_block( branch_index, name )
+        block.set_block_name( name )
 
-    def new_if( self ):
-        self._next_if += 1
-        return 'if%d' % self._next_if
-
-    def new_local( self, local_var_index ):
-        next_id = self._local_ids.get(local_var_index, 0) + 1
-        self._local_ids[local_var_index] = next_id
-        local_var_name = self.py_func.__code__.co_varnames[local_var_index]
-        return '%s.%d' % (local_var_name, next_id)
+    def new_id( self, prefix ):
+        next_id = self._next_id_by_prefix.get( prefix, 0 ) + 1
+        self._next_id_by_prefix[prefix] = next_id
+        return '%s.%d' % (prefix, next_id)
 
     def push_value( self, l_value ):
         self.value_stack.append( l_value )
@@ -428,15 +435,17 @@ class FunctionCodeGenerator(object):
         """
         then_branch_index = self.next_instr_index
         else_branch_index = oparg
-        if_id = self.new_if()
-        block_then = BasicBlock( self.l_func, '%s_then' % if_id, then_branch_index )
+        then_id = self.new_id( 'then' )
+        else_id = self.new_id( 'else' )
+        cond_id = self.new_id( 'if_cond' )
+        block_then = BasicBlock( self.l_func, then_id, then_branch_index )
         block_then.incoming_blocks.append( self.current_block )
-        block_else = BasicBlock( self.l_func, '%s_else' % if_id, else_branch_index )
+        block_else = BasicBlock( self.l_func, else_id, else_branch_index )
         block_else.incoming_blocks.append( self.current_block )
         # Conditional branch instruction
         l_cond_value = self.pop_value() # must be of type i1
         if not l_cond_value.name:
-            l_cond_value.name = 'cond_' + if_id
+            l_cond_value.name = cond_id
         self.builder.cbranch( l_cond_value,
                               block_then.l_basic_block,
                               block_else.l_basic_block )
@@ -456,7 +465,7 @@ class FunctionCodeGenerator(object):
            Try to retrieve an existing block at target location, and create
            one if none exist.
         """
-        br_id = self.new_if()
+        br_id = self.new_id( 'branch' )
         # Creates or retrieve block corresponding to branch target index
         block = self.get_or_register_target_branch_block( branch_index,
                                                           br_id )
@@ -478,8 +487,16 @@ class FunctionCodeGenerator(object):
         the loop occurs.
         Related opcodes: break_loop, pop_block.
         """
-        assert self.next_instr_index in self.branch_indexes
+        if self.next_instr_index not in self.branch_indexes:
+            raise ValueError( 'Logic error: new block expected after setup_loop opcode @%d.' %
+                              self.next_instr_index )
+        while_id = self.new_id( 'while' )
+        self.reset_block_name( self.next_instr_index, while_id )
+
         branch_index = oparg + self.next_instr_index
+        end_while_id = self.new_id( 'end_while' )
+        self.reset_block_name( branch_index, end_while_id )
+
         self.current_block.setup_loop_break_target( branch_index )
         return ACTION_PROCESS_NEXT_OPCODE
 

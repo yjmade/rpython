@@ -58,6 +58,19 @@ class TestFlowControl(unittest.TestCase):
             return count
         self.assertEqual( 5, rpy.run( main_while, 3 ) )
 
+    def test_while_break_else( self ):
+        def main_while( x ):
+            count = x
+            while count < 20:
+                if count % 5 == 0:
+                    break
+                count += 1
+            else:
+                count *= 2
+            return count
+        self.assertEqual( 40, rpy.run( main_while, 16 ) )
+        self.assertEqual( 5, rpy.run( main_while, 1 ) )
+
     def test_nested_while_break1( self ):
         def main_while( x ):
             count = x

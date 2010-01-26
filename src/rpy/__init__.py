@@ -85,23 +85,29 @@ def optimize( module ):
     pm.run( module.l_module )
 
 
-def run( py_func, *call_args ):
+def run( py_main_func, *call_args ):
     from rpy.rtypes import ConstantTypeRegistry
     registry = ConstantTypeRegistry()
     # Annotates call graph types (local var, functions param/return...)
     annotator = CallableGraphAnnotator( registry )
-    annotator.set_entry_point( py_func, call_args )
+    annotator.set_entry_point( py_main_func, call_args )
     annotator.annotate_dependencies()
     # Generate LLVM code
     from rpy.codegenerator import ModuleGenerator, FunctionCodeGenerator, L_INT_TYPE, L_BOOL_TYPE
     module = ModuleGenerator()
     l_func_entry, l_func_type = None, None
-    for callable, type_annotator in annotator.annotator_by_callable.items():
+    # Declares all function in modules
+    fn_code_generators = []
+    for r_func_type, type_annotator in annotator.annotator_by_callable.items():
+        py_func = r_func_type.get_function_object()
         func_generator = FunctionCodeGenerator( py_func, registry, module,
                                                 annotator )
+        fn_code_generators.append( (r_func_type, func_generator) )
+    # Generates function's code, possibly referencing previously declared functions
+    for r_func_type, func_generator in fn_code_generators:
         func_generator.generate_llvm_code()
         func_generator.report()
-        if callable.get_function_object() is py_func:
+        if r_func_type.get_function_object() is py_main_func:
             l_func_entry = func_generator.l_func
             l_func_type = func_generator.l_func_type
     print( 'Generated module code:' )

@@ -20,6 +20,7 @@ def rtype_callable_to_llvm( rtype_callable, type_registry ):
     l_arg_types = []
     for r_arg_type in rtype_callable.get_arg_types():
         l_arg_types.append( rtype_to_llvm(r_arg_type, type_registry) )
+    # Calling convention: lcore.CC_FASTCALL or lcore.CC_X86_FASTCALL
     return lcore.Type.function( l_return_type, l_arg_types )
 
 L_INT_TYPE = lcore.Type.int(32)
@@ -64,6 +65,13 @@ class ModuleGenerator(object):
         assert py_func not in self.l_functions
         self.l_functions[ py_func ] = l_function
         return l_function, l_func_type
+
+    def get_function( self, py_func ):
+        """Returns the LLVM function declaration corresponding to the
+           specified python function.
+        """
+        return self.l_functions[ py_func ]
+        
 
 
 ACTION_PROCESS_NEXT_OPCODE = 0
@@ -170,7 +178,7 @@ class FunctionCodeGenerator(object):
         self.type_registry = type_registry
         self.blocks_by_target = {} # dict{opcode_index: basic_block}
         self.branch_indexes = determine_branch_targets( self.py_func.__code__.co_code ) # read-only
-        self.local_var_value_by_block = {} # dict{basic_block: 
+        self.global_var_values = {} # dict{global_index: l_value}
         self._next_id_by_prefix = {}
         self.value_stack = []
         self.pending_break_jump_blocks = [] # List of blocks that need a final "break" jump
@@ -319,40 +327,62 @@ class FunctionCodeGenerator(object):
     def get_constant_type( self, constant_index ):
         return self.annotation.get_constant_type( constant_index )
 
-##
-##    def opcode_load_global( self, oparg ):
-##        var_type = self.get_global_var_type( oparg )
-##        self.push_type( var_type )
-##        return ACTION_PROCESS_NEXT_OPCODE
-##
+    def get_global_var_type( self, global_index ):
+        return self.annotation.get_global_type( global_index )
+
+    def py_value_as_llvm_value( self, py_value, r_value_type ):
+        """Returns a tuple (l_value, r_type) for the specified python object.
+        """
+        l_value_type = rtype_to_llvm( r_value_type, self.type_registry )
+        if l_value_type == L_INT_TYPE:
+            l_value = lcore.Constant.int( L_INT_TYPE, py_value )
+        elif isinstance( l_value_type, lcore.FunctionType ):
+            l_value = self.module_generator.get_function( py_value )
+        else:
+            raise NotImplementedError( 'Can not managed code generator for constant: %r' % py_const_value )
+        return (l_value, l_value_type)
+
+    def opcode_load_global( self, oparg ):
+        global_index = oparg
+        if global_index in self.global_var_values:
+            return self.global_var_values[global_index]
+
+        global_var_name = self.py_func.__code__.co_names[global_index]
+        py_value = self.py_func.__globals__[ global_var_name ]
+
+        r_type = self.get_global_var_type( global_index )
+        l_value, l_value_type = self.py_value_as_llvm_value(
+            py_value, r_type )
+        self.global_var_values[global_index] = l_value
+        self.push_value( l_value )
+        return ACTION_PROCESS_NEXT_OPCODE
+
     def opcode_load_const( self, oparg ):
         constant_index = oparg
         py_const_value = self.py_func.__code__.co_consts[constant_index]
         r_value_type = self.get_constant_type( constant_index )
-        l_value_type = rtype_to_llvm( r_value_type, self.type_registry )
-        if l_value_type == L_INT_TYPE:
-            l_value = lcore.Constant.int( L_INT_TYPE, py_const_value )
-        else:
-            raise NotImplementedError( 'Can not managed code generator for constant: %r' % py_const_value )
+        l_value, l_value_type = self.py_value_as_llvm_value(
+            py_const_value, r_value_type )
         self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
-##
-##    def opcode_call_function( self, oparg ):
-##        nb_arg = oparg & 0xff
-##        nb_kw = (oparg >> 8) & 0xff
+
+    def opcode_call_function( self, oparg ):
+        nb_arg = oparg & 0xff
+        nb_kw = (oparg >> 8) & 0xff
+        if nb_kw:
+            raise ValueError( "keywords argument not supported in function call." )
 ##        kw_args = {}
 ##        for kw_index in range(0,nb_kw):
 ##            parameter_type = self.pop_type()
 ##            parameter_name = self.pop_constant_value()
 ##            kw_args[parameter_name] = parameter_type
-##        arg_types = self.pop_types( nb_arg )
-##        func_type = self.pop_type()
-##        for index, arg_type in enumerate(arg_types):
-##            func_type.record_arg_type( index, arg_type )
-##        for parameter_name, parameter_type in kw_args.items():
-##            func_type.record_keyword_arg_type( parameter_name, parameter_type )
-##        self.push_type( func_type.get_return_type() )
-##        return ACTION_PROCESS_NEXT_OPCODE
+        l_arg_values = []
+        for index in range(0,nb_arg):
+            l_arg_values.insert( 0, self.pop_value() )
+        l_fn_value = self.pop_value()
+        l_return_value = self.builder.call( l_fn_value, l_arg_values )
+        self.push_value( l_return_value )
+        return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_store_fast( self, oparg ):
         """Stores the local variable/parameter value in the current block.

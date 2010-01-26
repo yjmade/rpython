@@ -43,6 +43,7 @@ class TypeAnnotator(object):
         self.branch_indexes = []
         self.type_stack = [] # List of rtypes.Type
         self.local_vars = {} # Dict {local_var_index : [ rtypes.Type ] }
+        self.global_types = {} # Dict {global_index: rtypes.Type}
         self.constant_types = {} # Dict {constant_index: rtypes.Type}
         # Function parameters are the first local variables. Initialize their types
         for index, arg_type in enumerate( self.r_func_type.get_arg_types() ):
@@ -56,6 +57,9 @@ class TypeAnnotator(object):
 
     def get_constant_type( self, constant_index ):
         return self.constant_types[constant_index]
+
+    def get_global_type( self, global_index ):
+        return self.global_types[global_index]
 
     def report( self ):
         print( 'Type for function', self.py_func )
@@ -115,18 +119,24 @@ class TypeAnnotator(object):
         self.type_stack = self.type_stack[:-n]
         return [t for t, v in r_value_types]
 
-    def get_global_var_type( self, oparg ):
+    def get_global_var_type( self, global_index ):
         """Get a global variable type.
            If the global varuable is not found in the func_globals dictionnary
         then it is a built-in variable.
+           Returns: rpy.types.Type
         """
-        global_var_name = self.func_code.co_names[oparg]
+        if global_index in self.global_types:
+            return self.global_types[global_index]
+        global_var_name = self.func_code.co_names[global_index]
         opcode_location = self.get_opcode_location()
         if global_var_name in self.py_func.__globals__:
             global_var_value = self.py_func.__globals__[ global_var_name ]
-            return self.type_registry.from_python_object( global_var_value,
-                                                          opcode_location )
-        return self.type_registry.get_builtin_type( global_var_name )
+            r_type = self.type_registry.from_python_object( global_var_value,
+                                                            opcode_location )
+        else:
+            r_type = self.type_registry.get_builtin_type( global_var_name )
+        self.global_types[global_index] = r_type
+        return r_type
 
     def record_local_var_type( self, local_var_index, var_type ):
         opcode_location = self.get_opcode_location()

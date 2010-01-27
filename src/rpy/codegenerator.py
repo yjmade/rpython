@@ -168,6 +168,18 @@ class BasicBlock(object):
             loop_info )
 
 class FunctionCodeGenerator(object):
+    """The function code generator acts mostly as a python bytecode to LLVM translator.
+
+       General notes:
+       Local variables are allocated on the stack via llvm.alloca.
+       Parameters are allocated on the stack via llvm.alloca, and the initial value
+       passed to the function is copied. This allow parameters to be assigned to.
+       Load and store operations are used to load/store local variable/parameter values.
+       LLVM optimization pass handle the convertion into register via the
+       insertion of phi nodes. Not having to handle phi nodes drastically
+       simply the code generation.
+    
+    """
     def __init__( self, py_func, type_registry, module_generator, annotator ):
         self.py_func = py_func
         self.module_generator = module_generator
@@ -184,7 +196,8 @@ class FunctionCodeGenerator(object):
         self.pending_break_jump_blocks = [] # List of blocks that need a final "break" jump
         # self.locals_ptr: dict{local_var_index: l_value}
         #   This dictionary contains pointer to local variable memory
-        #   allocated via alloca().
+        #   allocated via alloca(), and pointer directly to parameters
+        #   for parameters.
         self.builder, self.current_block, self.locals_ptr = \
                       self.make_entry_basic_block_builder()
 
@@ -201,11 +214,16 @@ class FunctionCodeGenerator(object):
         builder = lcore.Builder.new( entry_block.l_basic_block )
         py_code = self.py_func.__code__
         locals_ptr = {}
-        for local_var_index in range(self.arg_count, py_code.co_nlocals ):
+        for local_var_index in range(0, py_code.co_nlocals ):
             local_var_name = py_code.co_varnames[local_var_index]
             r_type = self.annotation.get_local_var_type( local_var_index )
             l_type = rtype_to_llvm( r_type, self.type_registry )
-            l_value = builder.alloca( l_type, local_var_name )
+            if local_var_index < self.arg_count: # function parameter
+                l_param_value = self.l_func.args[local_var_index]
+                l_value = builder.alloca( l_type, local_var_name + ".param" )
+                builder.store( l_param_value, l_value )
+            else:
+                l_value = builder.alloca( l_type, local_var_name )
             locals_ptr[local_var_index] = l_value
         return (builder, entry_block, locals_ptr)
 
@@ -397,13 +415,9 @@ class FunctionCodeGenerator(object):
         """Retrieves the local variable/parameter value from the current block.
         """
         local_var_index = oparg
-        if local_var_index < self.arg_count: # accessing parameter value
-            l_value = self.l_func.args[local_var_index]
-            self.push_value( l_value )
-        else:
-            l_local_ptr = self.locals_ptr[ local_var_index ]
-            l_value = self.builder.load( l_local_ptr )
-            self.push_value( l_value )
+        l_local_ptr = self.locals_ptr[ local_var_index ]
+        l_value = self.builder.load( l_local_ptr )
+        self.push_value( l_value )
         return ACTION_PROCESS_NEXT_OPCODE
 ##
 ##    def opcode_load_attr( self, oparg ):

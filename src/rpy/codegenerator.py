@@ -5,38 +5,6 @@ import rpy.rtypes as rtypes
 import llvm.core as lcore
 from rpy.typeinference import FunctionLocationHelper
 
-_RTYPE_CONVERTERS = {}
-
-def rtype_to_llvm( rtype, type_registry ):
-    return _RTYPE_CONVERTERS[rtype.__class__]( rtype, type_registry )
-
-def rtype_unknown_to_llvm( rtype, type_registry ):
-    return rtype_to_llvm( rtype.get_resolved_type( type_registry ),
-                          type_registry )
-
-def rtype_callable_to_llvm( rtype_callable, type_registry ):
-    l_return_type = rtype_to_llvm( rtype_callable.get_return_type(),
-                                   type_registry )
-    l_arg_types = []
-    for r_arg_type in rtype_callable.get_arg_types():
-        l_arg_types.append( rtype_to_llvm(r_arg_type, type_registry) )
-    # Calling convention: lcore.CC_FASTCALL or lcore.CC_X86_FASTCALL
-    return lcore.Type.function( l_return_type, l_arg_types )
-
-L_INT_TYPE = lcore.Type.int(32)
-L_DOUBLE_TYPE = lcore.Type.double()
-L_BOOL_TYPE = lcore.Type.int(1)
-
-_RTYPE_CONVERTERS.update( {
-    rtypes.IntType: lambda rtype, registry: L_INT_TYPE,
-    rtypes.NoneType: lambda rtype, registry: lcore.Type.void(),
-    rtypes.UnknownType: rtype_unknown_to_llvm,
-    rtypes.CallableType: rtype_callable_to_llvm,
-    rtypes.FunctionType: rtype_callable_to_llvm,
-    rtypes.FloatType: lambda rtype, registry: L_DOUBLE_TYPE,
-    rtypes.BoolType: lambda rtype, registry: L_BOOL_TYPE,
-    } )
-
 # Maps Python comparison to LLVM comparison predicate
 _PY_CMP_AS_LLVM = {
     CMP_LT: lcore.IPRED_SLT,
@@ -47,23 +15,168 @@ _PY_CMP_AS_LLVM = {
     CMP_GT: lcore.IPRED_SGT,
     }
 
-class ModuleGenerator(object):
-    def __init__( self ):
-        self.l_module = lcore.Module.new('main_module')
-        self.l_functions = {} # dict { py_func: l_func }
+_FN_ALLOC = 'alloc'
 
-    def add_function( self, py_func, type_registry ):
-        func_location = FunctionLocationHelper(
-            py_func.__code__ ).get_location(0)
-        r_func_type = type_registry.from_python_object( py_func, func_location )
-        l_func_type = rtype_to_llvm( r_func_type, type_registry )
+# rtype -> LLVM primitive types
+L_INT_TYPE = lcore.Type.int(32)
+L_DOUBLE_TYPE = lcore.Type.double()
+L_BOOL_TYPE = lcore.Type.int(1)
+L_VOID_TYPE = lcore.Type.void()
+
+L_CONSTANT_0 = lcore.Constant.int( L_INT_TYPE, 0 )
+
+
+class LLVMTypeProvider(object):
+    """Converts a rtype into an llvm type.
+    """
+    def __init__( self, l_module, type_registry ):
+        self.l_module = l_module
+        self.type_registry = type_registry
+        self._converters = {
+            rtypes.IntType: lambda rtype: (L_INT_TYPE, None),
+            rtypes.NoneType: lambda rtype: (lcore.Type.void(), None),
+            rtypes.UnknownType: self._rtype_unknown_to_llvm,
+            rtypes.CallableType: self._rtype_callable_to_llvm,
+            rtypes.FunctionType: self._rtype_callable_to_llvm,
+            rtypes.FloatType: lambda rtype: (L_DOUBLE_TYPE, None),
+            rtypes.BoolType: lambda rtype: (L_BOOL_TYPE, 'bool'),
+            rtypes.ClassType: self._rtype_class_to_llvm,
+            rtypes.InstanceType: self._rtype_instance_to_llvm
+            }
+        self._l_type_by_rtype = {} # dict{ r_type : l_type }
+        self._l_type_by_rtype_callable = {} # dict{ r_type_callable : l_type }
+        self._r_class_attributes = {} # dict { r_type_class: dict { attribute_name : l_constant_index } }
+
+    def from_rtype( self, rtype ):
+        """Returns the LLVM type corresponding to rtype.
+           An LLVM type alias corresponding to the type name is automatically
+           added to the LLVM module.
+           If the rtype is a class, then the corresponding LLVM structure type is returned.
+        """
+        l_type = self._l_type_by_rtype.get( rtype )
+        if l_type is None:
+            l_type, name = self._converters[rtype.__class__]( rtype )
+            self._l_type_by_rtype[ rtype ] = l_type
+            self._declare_named_l_type( l_type, name )
+        return l_type
+
+    def from_rtype_callable( self, rtype ):    
+        """Returns the LLVM function type corresponding to rtype.
+           An LLVM type alias corresponding to the type name is automatically
+           added to the LLVM module.
+           If the rtype is a class, then the type of the constructor function is returned.
+        """
+        l_type = self._l_type_by_rtype_callable.get( rtype )
+        if l_type is None:
+            if isinstance( rtype, rtypes.UnknownType ):
+                l_type, name = self._rtype_unknown_callable_to_llvm( rtype )
+            elif isinstance( rtype, rtypes.CallableType ):
+                l_type, name = self._rtype_callable_to_llvm( rtype )
+            else:
+                raise ValueError( 'RType is not a CallableType:' + str(rtype) )
+            self._l_type_by_rtype_callable[ rtype ] = l_type
+            self._declare_named_l_type( l_type, name )
+        return l_type
+
+    def get_attribute_index( self, r_type, attribute_name ):
+        """Returns a integer constant corresponding to the index of the attribute
+        'attribute_name' in r_type. r_type must be either an instance or a class.
+        """
+        # This dictionnary is set the first time the rtype class is converted to an llvm type
+        r_type_class = r_type.get_resolved_type( self.type_registry )
+        if isinstance( r_type_class, rtypes.InstanceType ):
+            r_type_class = r_type_class.class_type
+        l_attribute_indexes_by_name = self._r_class_attributes[r_type_class]
+        return l_attribute_indexes_by_name[attribute_name]
+
+    def _declare_named_l_type( self, l_type, name ):
+        """Declares a type alias for l_type in the module with the specified
+           name prefixed by 'rtype_'.
+        """
+        if name:
+            self.l_module.add_type_name( 'rtype_' + name, l_type )
+
+    def _rtype_class_to_llvm( self, rtype_class ):
+        print( '#' * 80 )
+        l_attribute_types = []
+        r_instance_type = rtype_class.instance_type
+        r_instance_type.flush_pending_records( self.type_registry )
+        l_attribute_indexes_by_name = {}
+        for name, r_attribute_type in r_instance_type.attribute_types.items():
+            print( 'Found attribute:', name, r_attribute_type )
+            l_attribute_type = self.from_rtype( r_attribute_type )
+            l_attribute_indexes_by_name[name] = lcore.Constant.int( L_INT_TYPE, len(l_attribute_types) )
+            l_attribute_types.append( l_attribute_type )
+        l_struct_type = lcore.Type.struct( l_attribute_types )
+        self._r_class_attributes[rtype_class] = l_attribute_indexes_by_name
+        return l_struct_type, rtype_class.get_qualified_type_name()
+
+    def _rtype_instance_to_llvm( self, rtype_instance ):
+        l_class_type = self.from_rtype( rtype_instance.class_type )
+        return lcore.Type.pointer( l_class_type ), None
+    
+    def _rtype_unknown_to_llvm( self, rtype ):
+        return self.from_rtype( rtype.get_resolved_type( self.type_registry ) ), None
+
+    def _rtype_unknown_callable_to_llvm( self, rtype ):
+        return self.from_rtype_callable( rtype.get_resolved_type( self.type_registry ) ), None
+
+    def _rtype_callable_to_llvm( self, rtype_callable ):
+        if isinstance( rtype_callable, rtypes.ClassType ):
+            # Notes: ClassType callable type (a constructor) indicates that it return an instance of that type.
+            # This is usefull for type inferance, but the generated LLVM pass the allocated instance to the function.
+            # So the constructor function is modified to just return void.
+            l_return_type = L_VOID_TYPE
+        else:
+            l_return_type = self.from_rtype( rtype_callable.get_return_type() )
+        l_arg_types = []
+        for r_arg_type in rtype_callable.get_arg_types():
+            l_arg_types.append( self.from_rtype(r_arg_type) )
+        # Calling convention: lcore.CC_FASTCALL or lcore.CC_X86_FASTCALL
+        return lcore.Type.function( l_return_type, l_arg_types ), None
+
+class ModuleGenerator(object):
+    def __init__( self, type_registry ):
+        self.l_module = lcore.Module.new('main_module')
+        self._type_provider = LLVMTypeProvider( self.l_module, type_registry )
+        self.l_functions = {} # dict { py_func: l_func }
+        #self.l_sys_functions[_FN_ALLOC] = 
+
+    def llvm_type_from_rtype( self, rtype ):
+        """Returns the LLVM type corresponding to rtype.
+           An LLVM type alias corresponding to the type name is automatically
+           added to the LLVM module.
+           If the rtype is a class, then the corresponding LLVM structure type is returned.
+        """
+        return self._type_provider.from_rtype( rtype )
+
+    def llvm_function_type_from_rtype( self, rtype ):    
+        """Returns the LLVM function type corresponding to rtype.
+           An LLVM type alias corresponding to the type name is automatically
+           added to the LLVM module.
+           If the rtype is a class, then the type of the constructor function is returned.
+        """
+        return self._type_provider.from_rtype_callable( rtype )
+
+    def get_attribute_index( self, r_type_class, attribute_name ):
+        """Returns a integer constant corresponding to the index of the attribute
+        'attribute_name' in r_type_class.
+        """
+        return self._type_provider.get_attribute_index( r_type_class, attribute_name )
+
+    def add_function( self, py_func, r_func_type ):
+        # Notes: some rtypes are both a type and a callable (constructor). We hardwire that we want the callable aspect as llvm type.
+        l_func_type = self.llvm_function_type_from_rtype( r_func_type )
         l_func_name = py_func.__module__ + '__' + py_func.__name__
         l_function = self.l_module.add_function( l_func_type, l_func_name )
+        print( 'ModuleGenerator.add_function( %s -> %s )' % (py_func, str(l_function).replace('\n','')) )
         code = py_func.__code__
         for index, arg_name in enumerate( code.co_varnames[:code.co_argcount] ): # function parameter names
             l_function.args[index].name = arg_name
         assert py_func not in self.l_functions
         self.l_functions[ py_func ] = l_function
+        if r_func_type.is_constructor():
+            self.l_functions[ r_func_type.py_class ] = l_function
         return l_function, l_func_type
 
     def get_function( self, py_func ):
@@ -178,16 +291,19 @@ class FunctionCodeGenerator(object):
        LLVM optimization pass handle the convertion into register via the
        insertion of phi nodes. Not having to handle phi nodes drastically
        simply the code generation.
-    
+
+       When generating code for "constructor" function, then return statement is forced to
+       return void (ignoring the python generated return None).
     """
-    def __init__( self, py_func, type_registry, module_generator, annotator ):
+    def __init__( self, py_func, module_generator, annotator ):
         self.py_func = py_func
         self.module_generator = module_generator
         self.annotator = annotator
         self.annotation = self.annotator.get_function_annotation( self.py_func )
-        self.l_func, self.l_func_type = module_generator.add_function( py_func, type_registry )
+        self.l_func, self.l_func_type = module_generator.add_function(
+            py_func, self.annotation.r_func_type )
         self.arg_count = self.l_func_type.arg_count
-        self.type_registry = type_registry
+        self.is_constructor = self.annotation.r_func_type.is_constructor()
         self.blocks_by_target = {} # dict{opcode_index: basic_block}
         self.branch_indexes = determine_branch_targets( self.py_func.__code__.co_code ) # read-only
         self.global_var_values = {} # dict{global_index: l_value}
@@ -217,7 +333,7 @@ class FunctionCodeGenerator(object):
         for local_var_index in range(0, py_code.co_nlocals ):
             local_var_name = py_code.co_varnames[local_var_index]
             r_type = self.annotation.get_local_var_type( local_var_index )
-            l_type = rtype_to_llvm( r_type, self.type_registry )
+            l_type = self.module_generator.llvm_type_from_rtype( r_type )
             if local_var_index < self.arg_count: # function parameter
                 l_param_value = self.l_func.args[local_var_index]
                 l_value = builder.alloca( l_type, local_var_name + ".param" )
@@ -333,10 +449,15 @@ class FunctionCodeGenerator(object):
         self._next_id_by_prefix[prefix] = next_id
         return '%s.%d' % (prefix, next_id)
 
-    def push_value( self, l_value ):
-        self.value_stack.append( l_value )
+    def push_value( self, l_value, r_type ):
+        self.value_stack.append( (l_value, r_type) )
 
     def pop_value( self ):
+        """Returns the last pushed l_value."""
+        return self.value_stack.pop()[0]
+
+    def pop_value_with_rtype( self ):
+        """Returns the last pushed tuple (l_value, r_type)."""
         return self.value_stack.pop()
 
     def warning( self, message ):
@@ -349,15 +470,20 @@ class FunctionCodeGenerator(object):
         return self.annotation.get_global_type( global_index )
 
     def py_value_as_llvm_value( self, py_value, r_value_type ):
-        """Returns a tuple (l_value, r_type) for the specified python object.
+        """Returns a tuple (l_value, l_type) for the specified python object.
         """
-        l_value_type = rtype_to_llvm( r_value_type, self.type_registry )
+        l_value_type = self.module_generator.llvm_type_from_rtype( r_value_type )
         if l_value_type == L_INT_TYPE:
             l_value = lcore.Constant.int( L_INT_TYPE, py_value )
         elif isinstance( l_value_type, lcore.FunctionType ):
             l_value = self.module_generator.get_function( py_value )
+        elif py_value is None:
+            l_value = lcore.Constant.int( L_INT_TYPE, 0 ) # @todo Use more distinct type to generate error
+        elif isinstance( py_value, type ):
+            # Notes: this assumes we want the constructor function corresponding to the type
+            l_value = self.module_generator.get_function( py_value )
         else:
-            raise NotImplementedError( 'Can not managed code generator for constant: %r' % py_const_value )
+            raise NotImplementedError( 'Can not manage code generation for constant: %r' % py_value )
         return (l_value, l_value_type)
 
     def opcode_load_global( self, oparg ):
@@ -372,7 +498,7 @@ class FunctionCodeGenerator(object):
         l_value, l_value_type = self.py_value_as_llvm_value(
             py_value, r_type )
         self.global_var_values[global_index] = l_value
-        self.push_value( l_value )
+        self.push_value( l_value, r_type )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_load_const( self, oparg ):
@@ -381,7 +507,7 @@ class FunctionCodeGenerator(object):
         r_value_type = self.get_constant_type( constant_index )
         l_value, l_value_type = self.py_value_as_llvm_value(
             py_const_value, r_value_type )
-        self.push_value( l_value )
+        self.push_value( l_value, r_value_type )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_call_function( self, oparg ):
@@ -397,9 +523,19 @@ class FunctionCodeGenerator(object):
         l_arg_values = []
         for index in range(0,nb_arg):
             l_arg_values.insert( 0, self.pop_value() )
-        l_fn_value = self.pop_value()
-        l_return_value = self.builder.call( l_fn_value, l_arg_values )
-        self.push_value( l_return_value )
+        l_fn_value, r_fn_type = self.pop_value_with_rtype()
+        if r_fn_type.is_constructor(): # The call is a constructor invocation
+            # We allocate the memory for the type, call the constructor, and
+            # use the address of the allocated type as expression value
+            l_struct_type = self.module_generator.llvm_type_from_rtype( r_fn_type )
+            # @todo allocate memory dynamically instead of on the stack
+            l_instance = self.builder.alloca( l_struct_type, self.new_id('instance') )
+            l_arg_values.insert( 0, l_instance )
+            self.builder.call( l_fn_value, l_arg_values )
+            l_return_value = l_instance
+        else:
+            l_return_value = self.builder.call( l_fn_value, l_arg_values )
+        self.push_value( l_return_value, r_fn_type.get_return_type() )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_store_fast( self, oparg ):
@@ -417,16 +553,32 @@ class FunctionCodeGenerator(object):
         local_var_index = oparg
         l_local_ptr = self.locals_ptr[ local_var_index ]
         l_value = self.builder.load( l_local_ptr )
-        self.push_value( l_value )
+        r_type = self.annotation.get_local_var_type( local_var_index )
+        self.push_value( l_value, r_type )
         return ACTION_PROCESS_NEXT_OPCODE
-##
-##    def opcode_load_attr( self, oparg ):
-##        attribute_name = self.func_code.co_names[oparg]
-##        self_type = self.pop_type()
-##        attribute_type = self_type.get_instance_attribute_type(
-##            self.type_registry, attribute_name )
-##        self.push_type( attribute_type )
-##        return -1
+
+    def opcode_load_attr( self, oparg ):
+        py_code = self.py_func.__code__
+        attribute_name = py_code.co_names[oparg]
+        l_instance_ptr, r_type_instance = self.pop_value_with_rtype()
+        l_attribute_index = self.module_generator.get_attribute_index(
+            r_type_instance, attribute_name )
+        l_attribute_ptr = self.builder.gep( l_instance_ptr, [L_CONSTANT_0, l_attribute_index] ) # gep =  getelementptr
+        l_attribute_value = self.builder.load( l_attribute_ptr )
+        r_type_attribute = r_type_instance.get_known_attribute_type( attribute_name )
+        self.push_value( l_attribute_value, r_type_attribute )
+        return ACTION_PROCESS_NEXT_OPCODE
+
+    def opcode_store_attr( self, oparg ):
+        py_code = self.py_func.__code__
+        attribute_name = py_code.co_names[oparg]
+        l_instance_ptr, r_type_instance = self.pop_value_with_rtype()
+        l_attribute_value = self.pop_value()
+        l_attribute_index = self.module_generator.get_attribute_index( r_type_instance, attribute_name )
+        l_attribute_ptr = self.builder.gep( l_instance_ptr, [L_CONSTANT_0, l_attribute_index] ) # gep =  getelementptr
+        self.builder.store( l_attribute_value, l_attribute_ptr )
+        return ACTION_PROCESS_NEXT_OPCODE
+
 ##
 ##    def opcode_pop_top( self, oparg ):
 ##        self.pop_type()
@@ -434,7 +586,11 @@ class FunctionCodeGenerator(object):
 ##
     def opcode_return_value( self, oparg ):
         l_value = self.pop_value()
-        self.builder.ret( l_value )
+        if self.is_constructor:
+            # Python generated code allow constuctor to return value. RPython does not allow this.
+            self.builder.ret_void()
+        else:
+            self.builder.ret( l_value )
         return ACTION_BRANCH
 
     def opcode_binary_add( self, oparg ):
@@ -459,18 +615,18 @@ class FunctionCodeGenerator(object):
     opcode_inplace_modulo = opcode_binary_modulo
 
     def generic_binary_op( self, value_factory ):
-        l_value_rhs = self.pop_value()
-        l_value_lhs = self.pop_value()
+        l_value_rhs, rtype_rhs = self.pop_value_with_rtype()
+        l_value_lhs, rtype_lhs = self.pop_value_with_rtype()
         l_value = value_factory( l_value_lhs, l_value_rhs )
-        self.push_value( l_value )
+        self.push_value( l_value, rtype_lhs )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_compare_op( self, oparg ):
-        l_value_rhs = self.pop_value()
-        l_value_lhs = self.pop_value()
+        l_value_rhs, rtype_rhs = self.pop_value_with_rtype()
+        l_value_lhs, rtype_lhs = self.pop_value_with_rtype()
         ipred = _PY_CMP_AS_LLVM[oparg]
         l_value = self.builder.icmp( ipred, l_value_lhs, l_value_rhs )
-        self.push_value( l_value )
+        self.push_value( l_value, rtypes.BoolType() )
         return ACTION_PROCESS_NEXT_OPCODE
 
     def opcode_pop_jump_if_false( self, oparg ):

@@ -35,16 +35,18 @@ class CallableGraphAnnotator(object):
     def annotate_dependencies( self ):
         from rpy.typeinference import TypeAnnotator
         while self.to_annotate:
-            function_type = next( iter( self.to_annotate ) )
-            self.to_annotate.remove( function_type )
+            r_func_type = next( iter( self.to_annotate ) )
+            self.to_annotate.remove( r_func_type )
             
             self.current_callable = None
-            py_func = function_type.get_function_object()
-            annotator = TypeAnnotator( py_func, self.type_registry )
-            self.annotator_by_callable[ annotator.r_func_type ] = annotator
+            annotator = TypeAnnotator( r_func_type, self.type_registry )
+            self.annotator_by_callable[ r_func_type ] = annotator
+            py_func = r_func_type.get_function_object()
             self.annotator_by_func[ py_func ] = annotator
             self.current_callable = annotator.r_func_type
-            
+
+            print( 'Source of %s' % py_func )
+            print( annotator.get_function_source() )
             print( 'Disassembly of %s:' % py_func )
             import dis
             dis.dis( py_func )
@@ -52,6 +54,7 @@ class CallableGraphAnnotator(object):
             annotator.report()
     
     def _on_callable_reference( self, callable_type ):
+        print( '===> Callable added:', callable_type )
         if callable_type not in self.annotator_by_callable:
             self.to_annotate.add( callable_type )
         if self.current_callable is not None:
@@ -89,22 +92,30 @@ def run( py_main_func, *call_args ):
     from rpy.rtypes import ConstantTypeRegistry
     registry = ConstantTypeRegistry()
     # Annotates call graph types (local var, functions param/return...)
+    print( '\nAnalysing call graph...\n%s' % ('='*70) )
     annotator = CallableGraphAnnotator( registry )
     annotator.set_entry_point( py_main_func, call_args )
     annotator.annotate_dependencies()
     # Generate LLVM code
     from rpy.codegenerator import ModuleGenerator, FunctionCodeGenerator, L_INT_TYPE, L_BOOL_TYPE
-    module = ModuleGenerator()
+    module = ModuleGenerator( registry )
     l_func_entry, l_func_type = None, None
     # Declares all function in modules
     fn_code_generators = []
     for r_func_type, type_annotator in annotator.annotator_by_callable.items():
         py_func = r_func_type.get_function_object()
-        func_generator = FunctionCodeGenerator( py_func, registry, module,
+        print( '\nDeclaring function:\n%s\nPython: %s\nRType: %s' % ('-'*70, py_func, r_func_type) )
+        func_generator = FunctionCodeGenerator( py_func, module,
                                                 annotator )
         fn_code_generators.append( (r_func_type, func_generator) )
+    # Makes sure that all class type have their struct/attribute index dict initialized
+    for r_func_type, _ in fn_code_generators:
+        if r_func_type.is_constructor():
+            module.llvm_type_from_rtype( r_func_type )
     # Generates function's code, possibly referencing previously declared functions
     for r_func_type, func_generator in fn_code_generators:
+        print( '\nGenerating code for function:\n%s\n%s\nSouce:\n' % ('-'*70, r_func_type) )
+        print( func_generator.annotation.get_function_source() )
         func_generator.generate_llvm_code()
         func_generator.report()
         if r_func_type.get_function_object() is py_main_func:

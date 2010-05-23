@@ -14,6 +14,18 @@ class FunctionLocationHelper(object):
         self._sorted_offsets = [ ol[0] for ol in sorted_offset_lineno ]
         self._sorted_lines = [ ol[1] for ol in sorted_offset_lineno ]
 
+    def get_source_range( self ):
+        return (self._sorted_lines[0]-1, self._sorted_lines[-1])
+
+    def get_source( self ):
+        with open( self.filename, 'rt', encoding='utf-8' ) as f:
+            source = f.readlines()
+        start_line, end_line = self.get_source_range()
+        while 'def' not in source[start_line] and start_line > 0:
+            start_line -= 1
+        fn_lines = [l.rstrip() for l in source[start_line:end_line]]
+        return '\n'.join( fn_lines )
+
     def get_location( self, opcode_index ):
         """Returns a tuple (function_name, filename, line).
         """
@@ -30,14 +42,13 @@ class TypeInference(object):
 
 
 class TypeAnnotator(object):
-    def __init__( self, py_func, type_registry ):
+    def __init__( self, r_func_type, type_registry ):
+        py_func = r_func_type.get_function_object()
         self.py_func = py_func
         self.location_helper = FunctionLocationHelper( py_func.__code__ )
         self.current_opcode_index = 0
         self.type_registry = type_registry
-        func_location = self.get_opcode_location()
-        self.r_func_type = type_registry.from_python_object( py_func,
-                                                             func_location )
+        self.r_func_type = r_func_type
         self.func_code = py_func.__code__
         self.visited_indexes = set()
         self.branch_indexes = []
@@ -48,6 +59,9 @@ class TypeAnnotator(object):
         # Function parameters are the first local variables. Initialize their types
         for index, arg_type in enumerate( self.r_func_type.get_arg_types() ):
             self.local_vars[index] = arg_type
+
+    def get_function_source( self ):
+        return self.location_helper.get_source()
 
     def get_opcode_location( self ):
         return self.location_helper.get_location( self.current_opcode_index )
@@ -176,6 +190,7 @@ class TypeAnnotator(object):
             parameter_name = self.pop_constant_value()
             kw_args[parameter_name] = parameter_type
         arg_types = self.pop_types( nb_arg )
+        print( '#'*10, 'Calling function with', arg_types )
         func_type = self.pop_type()
         for index, arg_type in enumerate(arg_types):
             func_type.record_arg_type( index, arg_type )
@@ -200,6 +215,14 @@ class TypeAnnotator(object):
         attribute_type = self_type.get_instance_attribute_type(
             self.type_registry, attribute_name )
         self.push_type( attribute_type )
+        return -1
+
+    def opcode_store_attr( self, oparg ):
+        attribute_name = self.func_code.co_names[oparg]
+        self_type = self.pop_type()
+        attribute_type = self.pop_type()
+        print( 'Storing attribute %s of type %r' % (attribute_name, attribute_type) )
+        self_type.record_attribute_type( attribute_name, attribute_type )
         return -1
 
     def opcode_pop_top( self, oparg ):

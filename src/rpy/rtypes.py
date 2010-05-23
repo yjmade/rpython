@@ -13,6 +13,8 @@ def make_detailed_location( location, detail ):
 class Type(object):
     def __init__( self, location = None ):
         self._location = location
+        # set of Unknown type referencing this Type
+        self._referenced_by = set() # set( UnknownType )
         
     def get_instance_attribute_type( self, type_registry, attribute_name ):
         """Gets the type of a module/class/instance attribute.
@@ -54,6 +56,14 @@ class Type(object):
     def _repr_detail_str( self ):
         """Should be overridden by sub-classes that needs extra detail."""
         return ''
+
+    def flush_pending_records( self, type_registry  ):
+        """Try to resolve all UnknownType referencing this type to flush
+           pending attributes.
+        """
+        self._referenced_by, r_references = set(), self._referenced_by
+        for r_unknown_type in r_references:
+            r_unknown_type.get_resolved_type( type_registry )
 
     def is_primitive_type( self ):
         return False
@@ -99,9 +109,10 @@ class CallableType(Type):
             unknown_type = self._arg_types[index]
         return unknown_type
 
-    def record_arg_type( self, index, type ):
-        unknown_type = self.get_arg_type( index )
-        unknown_type.add_candidate_type( type )
+    def record_arg_type( self, index, r_type ):
+        print( 'Record arg %d type:' % index, r_type )
+        r_unknown_type = self.get_arg_type( index )
+        r_unknown_type.add_candidate_type( r_type )
 
     def record_keyword_arg_type( self, param_name, param_type ):
         param_index = self.get_param_index( param_name )
@@ -113,6 +124,9 @@ class CallableType(Type):
     def get_param_index( self, param_name ):
         raise NotImplementedError( self.__class__ )
 
+    def is_constructor( self ):
+        return False
+
 class FunctionType(CallableType):
     """Associated to a single function.
     """
@@ -122,6 +136,10 @@ class FunctionType(CallableType):
         code = self.py_func.__code__
         self.arg_names = code.co_varnames[:code.co_argcount] # function parameter names
         self.methods = {} # Dict {instance_type: method_type}
+
+    def _repr_detail_str( self ):
+        args = tuple( self.get_arg_type(i) for i in range(0,self.get_arg_count()) )
+        return self.py_func.__module__ + '/' + self.py_func.__name__ + ', args=%r' % (args,)
 
     def get_arg_count( self ):
         return self.py_func.__code__.co_argcount
@@ -164,29 +182,76 @@ class MethodType(CallableType):
 class InstanceType(Type):
     def __init__( self, class_type ):
         super(InstanceType, self).__init__()
-        self.class_type = class_type
+        self.class_type = class_type # rtype
+        self.attribute_types = {} # dict{name: UnknownType}
+
+    def _repr_detail_str( self ):
+        """Should be overridden by sub-classes that needs extra detail."""
+        return ', class=%s' % self.class_type.py_class
+
+    def get_known_attribute_type( self, attribute_name ):
+        """Returns the rtype of an attribute.
+           Warning: Should be use only during code generation."""
+        return self.attribute_types[ attribute_name ]
 
     def get_instance_attribute_type( self, type_registry, attribute_name ):
         """Gets the type of a module/class/instance attribute.
         """
-        if hasattr( self.class_type.cls, attribute_name ):
-            attribute = getattr( self.class_type.cls, attribute_name )
+        if attribute_name in self.attribute_types:
+            return self.attribute_types[attribute_name]
+        if hasattr( self.class_type.py_class, attribute_name ):
+            attribute = getattr( self.class_type.py_class, attribute_name )
             attribute_type = type_registry.from_python_object( attribute )
-            return attribute_type.attach_to_instance( self )
-        raise ValueError( "Unsupported instance attribute: %r.%s" % (self.class_type, attribute_name) )
-        
+            attached_attribute_type = attribute_type.attach_to_instance( self )
+            self.attribute_types[attribute_name] = attached_attribute_type
+            return attached_attribute_type
+        attribute_type = UnknownType()
+        self.attribute_types[attribute_name] = attribute_type
+        return attribute_type
 
-class NewClassType(CallableType):
-    def __init__( self, cls ):
-        super(NewClassType, self).__init__()
-        self.cls = cls
+    def record_attribute_type( self, attribute_name, attribute_type ):
+        if not hasattr( self.class_type.py_class, attribute_name ): # ignore class attribute
+            if attribute_name in self.attribute_types:
+                generic_type = self.attribute_types[attribute_name]
+            else:
+                generic_type = UnknownType()
+                self.attribute_types[attribute_name] = generic_type
+            generic_type.add_candidate_type( attribute_type )
+
+
+class ClassType(FunctionType): # Notes: should probably be a subclass of MethodType
+    def __init__( self, py_class ):
+        py_func = py_class.__init__
+        super(ClassType, self).__init__( py_func )
+        self.py_class = py_class
         self.instance_type = InstanceType( self )
-        self._return_type = self.instance_type # Constructor return type is an instance of the class
-        code = cls.__init__.__code__
-        self.arg_names = code.co_varnames[:code.co_argcount] # function parameter names
+        # Constructor return type is an instance of the class
+        # overridden from base class
+        self._return_type = self.instance_type 
+        # Set type of 'self' parameter
+        self.get_arg_type(0).set_resolved_type( self.instance_type )
 
-    def get_param_index( self, param_name ):
-        return self.arg_names.index( param_name )
+    def get_qualified_type_name( self ):
+        return self.py_class.__name__
+
+    def get_known_attribute_type( self, attribute_name ):
+        """Returns the rtype of an attribute.
+           Warning: Should be use only during code generation."""
+        return self.instance_type.get_known_attribute_type( self, attribute_name )
+
+    def record_arg_type( self, index, r_type ):
+        # An offset of one is applied on the parameter index to
+        # take into account the implicit self parameter on
+        # constructor call __init__.
+        return super(ClassType, self).record_arg_type( index + 1, r_type )
+
+
+    def record_return_type( self, return_type ):
+        """Returns type of the __init__ methods is always known"""
+        pass
+
+    def is_constructor( self ):
+        return True
 
 class DictType(Type):
     pass
@@ -251,19 +316,34 @@ class UnknownType(Type):
         super(UnknownType, self).__init__( location=location )
         self.candidates = []
         self._resolved_type = None
+        self.attribute_types = {} # dict{name: UnknownType}
 
     def add_candidate_type( self, candidate_type ):
-        assert self._resolved_type is None
-        self.candidates.append( candidate_type )
+        if self._resolved_type is None:
+            if self not in candidate_type._referenced_by:
+                candidate_type._referenced_by.add( self )
+                self.candidates.append( candidate_type )
+
+    def set_resolved_type( self, r_type ):
+        """Used to set the resolved type. Usually called by get_resolved_type(),
+        but may be called directly in case like an implicit call to __init__
+        constructor where the type of self is known without doubt.
+        """
+        self._resolved_type = r_type
+        for attribute_name, attribute_types in self.attribute_types.items():
+            for attribute_type in attribute_types:
+                r_type.record_attribute_type( attribute_name, attribute_type )
 
     def get_resolved_type( self, type_registry ):
         if self._resolved_type is None:
             types = set( r_type.get_resolved_type(type_registry)
                          for r_type in self.candidates )
+##            if len(self.candidates) == 0:
+##                print( "**** Can not resolve self:")
             
             first_type = next(iter(types))
             if len(types) == 1:
-                self._resolved_type = first_type
+                self.set_resolved_type( first_type )
             else:
                 primitive_types = [t for t in types if t.is_primitive_type()]
                 if len(primitive_types) == len(types):
@@ -272,21 +352,40 @@ class UnknownType(Type):
                     if len(same_types) != len(types):
                         raise ValueError( 'Can not resolve unknown type%s because it is made of distinct primitive types: %r' %
                                           (self.get_location_str(), self) )
-                    self._resolved_type = first_type
+                    self.set_resolved_type( first_type )
                 else:
                     raise ValueError( 'Can not resolve unknown type%s (made of distinct non primitive types): %r' %
                                       (self.get_location_str(), self) )
         return self._resolved_type
 
+    def get_known_attribute_type( self, attribute_name ):
+        if self._resolved_type:
+            return self._resolved_type.get_known_attribute_type( attribute_name )
+        raise ValueError( 'Can not obtain a known attribute type of an unresolved type' )
+
+    def record_attribute_type( self, attribute_name, attribute_type ):
+        """Records attribute's types on assignment.
+           When the type is resolved, the recordded attribute's types are "replayed".
+        """
+        if self._resolved_type:
+            self._resolved_type.record_attribute_type( attribute_name, attribute_type )
+        if attribute_name in self.attribute_types:
+            self.attribute_types[attribute_name].append( attribute_type )
+        else:
+            self.attribute_types[attribute_name] = [ attribute_type ]
+
     def get_instance_attribute_type( self, type_registry, attribute_name ):
         """Gets the type of a class/instance attribute.
         """
+        if self._resolved_type:
+            return self._resolved_type.get_instance_attribute_type( type_registry, attribute_name )
         if len(self.candidates) == 1:
             return self.candidates[0].get_instance_attribute_type( type_registry, attribute_name )
         return super(UnknownType, self).get_instance_attribute_type( type_registry, attribute_name )
 
     def _repr_detail_str( self ):
-        return ', candidates=%s' % ', '.join( repr(c) for c in self.candidates )
+        resolved = ', resolved=%s' % repr(self._resolved_type) if self._resolved_type else ''
+        return resolved + ', candidates=%s' % ', '.join( repr(c) for c in self.candidates )
 
 ##PREDEFINED_MODULES = {
 ##    'codecs': native_module( {
@@ -328,9 +427,11 @@ class ConstantTypeRegistry(object):
             if id(obj) in self.instance_types:
                 return self.instance_types[id(obj)]
         if obj is None:
-            obj_type = NONE
+            obj_type = NoneType( location )
         elif isinstance( obj, types.FunctionType ):
             obj_type = FunctionType( obj )
+            if obj_type.py_func.__name__ == '__init__':
+                raise ValueError('logic error')
             if self.on_referenced_callable:
                 self.on_referenced_callable( obj_type )
 ## Python 2.6 only:
@@ -339,7 +440,7 @@ class ConstantTypeRegistry(object):
 ##            if self.on_referenced_callable:
 ##                self.on_referenced_callable( obj_type )
         elif isinstance( obj, type ):
-            obj_type = NewClassType( obj )
+            obj_type = ClassType( obj )
             if self.on_referenced_callable:
                 self.on_referenced_callable( obj_type )
         elif isinstance( obj, types.ModuleType ):

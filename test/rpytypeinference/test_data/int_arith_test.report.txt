@@ -1,0 +1,56 @@
+Function add:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function div:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function inplace_add:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function inplace_div:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function inplace_mul:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function inplace_reminder:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function inplace_sub:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function mixed:
+  Arg[a:1]: int
+  Arg[b:2]: int
+  Arg[c:3]: int
+  Return: int
+
+Function mul:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function reminder:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+
+Function sub:
+  Arg[x:1]: int
+  Arg[y:2]: int
+  Return: int
+

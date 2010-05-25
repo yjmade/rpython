@@ -1,0 +1,13 @@
+* Difference between Intel and AT&T Syntax (assembly)
+http://www.imada.sdu.dk/~kslarsen/Courses/dm516-2009-spring/Litteratur/IntelnATT.htm
+
+* asm compiler compatible with Intel syntax
+http://www.tortall.net/projects/yasm/
+http://en.wikipedia.org/wiki/JWASM
+
+
+* Type inference for Python
+http://lambda-the-ultimate.org/node/1519
+
+LOCALIZED TYPE INFERENCE OF ATOMIC TYPES IN PYTHON (thesis)
+=> http://www.ocf.berkeley.edu/~bac/thesis.pdf

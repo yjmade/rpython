@@ -27,3 +27,6 @@ env.bat
 Launch the unit tests (compile python functions to "RPython" LLVM JIT and check execution result)
 cd test\rpytest
 python __init__.py
+
+Running a specific unit test:
+python class.py TestClass.test_class_method
